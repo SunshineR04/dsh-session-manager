@@ -1,0 +1,12 @@
+# dsh-session-manager bundle layer: applied automatically when the package is
+# installed (`package.json` declares `dsh.bundle.patch`), i.e. a profile that
+# runs `dsh plugin --profile <name> add dsh-session-manager` gets this wiring
+# without any manual cordis.patch.yml edits. Later layers (the profile's own
+# cordis.patch.yml, --patch overlays) override these rows by id.
+#
+# The host row is purely additive: it registers the `/session-manager` RPC
+# channel, the `/sessions` slash-command family and the session-management
+# agent tools. No core row is touched, no core behavior is disabled.
+- insert:
+    - id: session-manager
+      name: dsh-session-manager

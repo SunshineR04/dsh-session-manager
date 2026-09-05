@@ -1,0 +1,69 @@
+{
+  "name": "dsh-session-manager",
+  "version": "0.2.2",
+  "description": "DSH plugin: manage archived sessions — list, restore, permanently delete, a first-class Settings page and a red delete button in the session context menu.",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "scripts": {
+    "check": "node --check lib/index.js && node --check lib/client.js",
+    "test": "pnpm run check && node --test test/host.test.mjs test/client.render.test.mjs"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "session",
+    "archive",
+    "session-management",
+    "plugin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SunshineR04/dsh-session-manager.git"
+  },
+  "homepage": "https://github.com/SunshineR04/dsh-session-manager",
+  "dependencies": {
+    "@deepseek-ai/schemastery": ">=3.18.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.1",
+    "puppeteer-core": "^25.10.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "_comment": "Copy to scripts/e2e-seed.local.json (gitignored) and fill in your own values. The seed copies real session logs from your $DSH_HOME into an isolated e2e home; sessions must exist in the source home.",
+  "sessions": [
+    {
+      "project": "--<encoded-project-dir>--",
+      "id": "session-<uuid>",
+      "archived": false
+    },
+    {
+      "project": "--<encoded-project-dir>--",
+      "id": "session-<uuid>",
+      "archived": true
+    }
+  ],
+  "workspaces": [
+    {
+      "id": "<uuid>",
+      "path": "<absolute project path>",
+      "title": "<workspace title>",
+      "sessionIds": [
+        "session-<uuid>"
+      ]
+    },
+    {
+      "id": "<uuid>",
+      "path": "<absolute project path>",
+      "title": "<other workspace>",
+      "sessionIds": [
+        "session-<uuid>"
+      ]
+    }
+  ]
+}
