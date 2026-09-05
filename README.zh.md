@@ -46,11 +46,8 @@ DSH 插件：**已归档会话管理**。为 DeepSeek Harness 补齐官方 UI �
 ## 安装
 
 ```bash
-# 从 GitHub（发布后）
-dsh plugin --profile <name> add dsh-session-manager
-
-# 本地目录开发 / 试装
-dsh plugin --profile <name> add "file:/path/to/dsh-session-manager"
+git clone https://github.com/SunshineR04/dsh-session-manager.git
+dsh plugin --profile <name> add "file:<克隆目录的绝对路径>"
 ```
 
 `dsh plugin add` 会通过 pnpm 安装并自动把包加入 `dsh.profile.bundles`；
@@ -129,6 +126,8 @@ dsh --profile <test-profile> --help           # 完整启动（headless 模板�
 浏览器端到端验证（隔离 DSH_HOME，不碰真实数据；需要本机 Chrome 与 puppeteer-core）：
 
 ```bash
+cp scripts/e2e-seed.local.example.json scripts/e2e-seed.local.json
+#    ^ 填入你自己的会话/工作区数据（已 gitignore，不会提交）
 node scripts/e2e-seed.mjs <e2e-home> ~/.dsh          # 1. 播种隔离测试 HOME
 # 2. 在该 HOME 下建 profile 装本插件，再启动测试 web 实例：
 #    DSH_HOME=<e2e-home> dsh --profile sm-test --port 43123 --no-open

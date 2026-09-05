@@ -27,7 +27,9 @@ pnpm test   # node --check on both libs + host unit tests + client render tests
 - E2E (`scripts/e2e-*.mjs`) drives a real web instance through puppeteer-core
   with Chrome hard-coded at `C:/Program Files/Google/Chrome/Application/chrome.exe`.
   It must run against an isolated home seeded by `scripts/e2e-seed.mjs`
-  (`DSH_HOME=<e2e-home>`), never against the real `~/.dsh`.
+  (`DSH_HOME=<e2e-home>`), never against the real `~/.dsh`. The seed reads
+  machine-specific data from `scripts/e2e-seed.local.json` (gitignored; copy
+  `e2e-seed.local.example.json`) — keep real paths/session ids out of the repo.
 
 ## Architecture
 

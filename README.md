@@ -54,14 +54,23 @@ item appears (native danger styling, same confirm dialog).
 ## Install
 
 ```bash
-dsh plugin --profile <name> add dsh-session-manager          # from the registry
-dsh plugin --profile <name> add "file:/path/to/dsh-session-manager"   # local
+git clone https://github.com/SunshineR04/dsh-session-manager.git
+dsh plugin --profile <name> add "file:/path/to/dsh-session-manager"
 ```
 
 `dsh plugin add` installs through pnpm and appends the package to
 `dsh.profile.bundles`; this package's `cordis.patch.yml` bundle layer mounts
 the plugin row automatically. **Restart the dsh desktop app afterwards**
 (new bundles are not hot-loaded).
+
+Alternatively mount it manually in the profile's `cordis.patch.yml` (the
+bundle channel above is easier):
+
+```yaml
+- insert:
+    - id: session-manager
+      name: dsh-session-manager
+```
 
 ## Delete semantics
 
@@ -126,6 +135,21 @@ pnpm test   # syntax check + host unit tests + client render smoke tests
 The render tests mount the real client settings section with React inside
 jsdom (`test/client.render.test.mjs`) — they catch UI crashes the host tests
 cannot see.
+
+### Browser E2E (optional)
+
+Boots a throwaway dsh web instance against an isolated `DSH_HOME` (never your
+real data) and drives the UI with puppeteer-core + local Chrome:
+
+```bash
+cp scripts/e2e-seed.local.example.json scripts/e2e-seed.local.json
+#    ^ fill in your own session/workspace data (gitignored, never committed)
+node scripts/e2e-seed.mjs <e2e-home> ~/.dsh         # 1. seed the isolated test HOME
+# 2. create a profile in that HOME with this plugin, then start the test web instance:
+#    DSH_HOME=<e2e-home> dsh --profile sm-test --port 43123 --no-open
+node scripts/e2e-check.mjs <printed token URL>      # 3. read-only checks: menu item / settings page
+node scripts/e2e-mutations.mjs <URL> <e2e-home>     # 4. closed loop: restore → archive → delete
+```
 
 ## References
 
