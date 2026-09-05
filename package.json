@@ -39,7 +39,7 @@
     "url": "git+https://github.com/SunshineR04/dsh-session-manager.git"
   },
   "homepage": "https://github.com/SunshineR04/dsh-session-manager",
-  "dependencies": {
+  "peerDependencies": {
     "@deepseek-ai/schemastery": ">=3.18.0"
   },
   "dsh": {
