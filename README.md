@@ -32,7 +32,7 @@ item appears (native danger styling, same confirm dialog).
 > and resolution fails, the button simply does not appear — nothing else is
 > affected.
 
-### 3. `/sessions` slash commands
+### 3. `/sessions` slash commands (host-dependent)
 
 ```
 /sessions                          # overview
@@ -42,6 +42,8 @@ item appears (native danger styling, same confirm dialog).
 /sessions pending                  # sessions queued for deletion at the next restart
 /sessions pending cancel <id>      # cancel one queued deletion
 ```
+
+> Slash commands ride the host's plugin-command registry. It is available in `dsh web` compositions; **the current desktop build does not mount that service**, so there is no slash surface there — use the Settings page, the context-menu item or the agent tools instead.
 
 ### 4. Agent tools
 

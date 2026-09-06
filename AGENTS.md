@@ -39,6 +39,9 @@ plugin row; `dsh plugin add` applies it):
 - **`lib/index.js` — host (Node, Cordis plugin)**. `apply(ctx, config)` mounts:
   RPC channel `/session-manager` (`connection.rpc.handle`), the `/sessions`
   command family (`commands.register`) and agent tools (`tools.register`).
+  Note: the `commands` service exists in `dsh web` compositions only — the
+  desktop build does not mount it, so slash commands silently stay off there
+  (registerCommands logs an info line); do not claim desktop slash support.
   Every dsh service is reached through `ctx.get(...)` wrapped in `tryGet` —
   surfaces register **defensively** and silently don't mount if the service is
   absent. Registrations go through `ctx.effect(fn, label)` for cleanup.
