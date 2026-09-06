@@ -32,20 +32,7 @@ item appears (native danger styling, same confirm dialog).
 > and resolution fails, the button simply does not appear — nothing else is
 > affected.
 
-### 3. `/sessions` slash commands
-
-```
-/sessions                          # overview
-/sessions archived                 # list archived sessions
-/sessions restore <#|id>           # restore (accepts the list index)
-/sessions delete <id>              # permanent delete (full id only)
-/sessions pending                  # sessions queued for deletion at the next restart
-/sessions pending cancel <id>      # cancel one queued deletion
-```
-
-> Slash commands ride the host's plugin-command registry, which every base-backed dsh profile mounts (desktop app and `dsh web` alike). If typing `/` shows no command menu after installing or updating, restart the app once: plugin versions before 0.2.4 registered against the registry too early in the boot sequence.
-
-### 4. Agent tools
+### 3. Agent tools
 
 | Tool | Notes |
 | --- | --- |

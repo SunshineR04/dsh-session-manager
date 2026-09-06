@@ -24,20 +24,7 @@ DSH 插件：**已归档会话管理**。为 DeepSeek Harness 补齐官方 UI �
 > React fiber 定位来增强渲染出的菜单。该增强是**被动式**的：一旦宿主 UI 结构
 > 变化导致定位失败，菜单按钮自动不出现，不影响其他任何功能。
 
-### 3. 斜杠命令 `/sessions`
-
-```
-/sessions                          # 概览：归档数 + 用法
-/sessions archived                 # 列出已归档会话（编号 + 标题 + 工作区 + 时间）
-/sessions restore <#|id>           # 恢复（支持列表编号）
-/sessions delete <id>              # 彻底删除（必须用完整 id，防编号漂移误删）
-/sessions pending                  # 查看待删除队列（重启后自动彻底删除的会话）
-/sessions pending cancel <id>      # 取消一个待删除项
-```
-
-> 斜杠命令走宿主的插件命令注册表，所有 base-backed 的 dsh 组合都已挂载（桌面端与 `dsh web` 均可）。安装或更新后输入 `/` 若没有命令菜单，重启一次应用即可：0.2.4 之前的版本在启动时序上注册过早。
-
-### 4. Agent 工具（模型可直接调用）
+### 3. Agent 工具（模型可直接调用）
 
 | 工具 | 说明 |
 | --- | --- |

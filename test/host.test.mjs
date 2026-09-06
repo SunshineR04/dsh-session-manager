@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createSessionManager, rpcHandlerFor, SessionManagerError, apply, registerCommands, registerTools } from '../lib/index.js'
+import { createSessionManager, rpcHandlerFor, SessionManagerError, apply, registerTools } from '../lib/index.js'
 
 // ---------------------------------------------------------------------------
 
@@ -430,33 +430,6 @@ test('rpc handler enforces the sessionId guard and maps domain errors', async ()
   const restored = await handler('restore', { sessionId: SESSION_ID })
   assert.equal(restored.ok, true)
   assert.equal(restored.value.restored, true)
-})
-
-test('/sessions slash command lists, restores by index and requires a full id for delete', async () => {
-  const fixture = await makeFixture()
-  const { ctx, headers, state, registry } = makeCtx({ fixture })
-  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
-  let registered = null
-  ctx.services.commands = { register: (def) => { registered = def } }
-  const manager = createSessionManager(ctx, {})
-  registerCommands(ctx, manager)
-
-  assert.ok(registered, 'command should register')
-  const overview = await registered.handler({ rawInput: '' })
-  assert.equal(overview.kind, 'success')
-
-  const list = await registered.handler({ rawInput: 'archived' })
-  assert.equal(list.kind, 'success')
-  assert.match(list.text, /Greeting/)
-
-  const restore = await registered.handler({ rawInput: 'restore #1' })
-  assert.equal(restore.kind, 'success')
-  assert.deepEqual(state.archivedSessionIds, [])
-
-  await registry.setState({ ...state, archivedSessionIds: [SESSION_ID] })
-  const deleteByIndex = await registered.handler({ rawInput: 'delete #1' })
-  assert.equal(deleteByIndex.kind, 'error')
-  assert.match(deleteByIndex.text, /full session id/)
 })
 
 test('agent tools register and the delete tool requires confirm', async () => {

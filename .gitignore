@@ -4,3 +4,4 @@ e2e-artifacts/
 .DS_Store
 *.log
 scripts/e2e-seed.local.json
+.zcode/

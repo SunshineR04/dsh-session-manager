@@ -2,7 +2,7 @@
 
 DeepSeek Harness (dsh) plugin that manages **archived sessions**: list, restore,
 permanently delete, a Settings page, a red context-menu item,
-`/sessions` slash commands and three agent tools. Plain JavaScript ESM, no
+agent tools. Plain JavaScript ESM, no
 TypeScript, no linter, no bundler. Package manager is **pnpm**; Node >= 20
 (e2e scripts need >= 22.12 via puppeteer-core).
 
@@ -37,14 +37,12 @@ Two runtime halves plus a bundle patch (`cordis.patch.yml` merely inserts the
 plugin row; `dsh plugin add` applies it):
 
 - **`lib/index.js` — host (Node, Cordis plugin)**. `apply(ctx, config)` mounts:
-  RPC channel `/session-manager` (`connection.rpc.handle`), the `/sessions`
-  command family (`commands.register`) and agent tools (`tools.register`).
-  The `commands` service is mounted by the dsh-base bundle patch in every
-  base-backed profile (desktop included), but it may start AFTER this plugin
-  (the plugin declares no host inject) — reading it once at apply time lost
-  that race and silently disabled slash commands (fixed in v0.2.4: both
-  registrations now wait via `ctx.inject([service], ...)`). Same pattern for
-  `tools`; do not revert to apply-time reads for host services.
+  RPC channel `/session-manager` (`connection.rpc.handle`) and agent tools
+  (`tools.register`).
+  The `/sessions` slash-command family was REMOVED in v0.3.0: the desktop host
+  has no slash surface, and the Settings page / context menu / agent tools
+  are the intended UX. Do not re-add command registrations unless the host
+  ecosystem gains a real desktop slash surface.
   Desktop compatibility audit (2026-09-06, verified against the installed
   desktop build's composition): `tools` service IS mounted (built-in tools
   run through it) and `register(definition)` matches our tool shape exactly
