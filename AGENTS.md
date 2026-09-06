@@ -39,9 +39,12 @@ plugin row; `dsh plugin add` applies it):
 - **`lib/index.js` — host (Node, Cordis plugin)**. `apply(ctx, config)` mounts:
   RPC channel `/session-manager` (`connection.rpc.handle`), the `/sessions`
   command family (`commands.register`) and agent tools (`tools.register`).
-  Note: the `commands` service exists in `dsh web` compositions only — the
-  desktop build does not mount it, so slash commands silently stay off there
-  (registerCommands logs an info line); do not claim desktop slash support.
+  The `commands` service is mounted by the dsh-base bundle patch in every
+  base-backed profile (desktop included), but it may start AFTER this plugin
+  (the plugin declares no host inject) — reading it once at apply time lost
+  that race and silently disabled slash commands (fixed in v0.2.4: both
+  registrations now wait via `ctx.inject([service], ...)`). Same pattern for
+  `tools`; do not revert to apply-time reads for host services.
   Desktop compatibility audit (2026-09-06, verified against the installed
   desktop build's composition): `tools` service IS mounted (built-in tools
   run through it) and `register(definition)` matches our tool shape exactly
