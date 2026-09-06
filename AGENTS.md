@@ -42,6 +42,14 @@ plugin row; `dsh plugin add` applies it):
   Note: the `commands` service exists in `dsh web` compositions only — the
   desktop build does not mount it, so slash commands silently stay off there
   (registerCommands logs an info line); do not claim desktop slash support.
+  Desktop compatibility audit (2026-09-06, verified against the installed
+  desktop build's composition): `tools` service IS mounted (built-in tools
+  run through it) and `register(definition)` matches our tool shape exactly
+  (per-property `parameters` descriptors like the built-in `todo_write`,
+  `output { schema, render }` required) — the three agent tools are live on
+  desktop. `workspaceRegistry`/`sessionPersistence`/`sessionController`/
+  `sessions`/`agents` are all present (session-controller injects them).
+  `settings` is optional: absent -> composition config only, graceful.
   Every dsh service is reached through `ctx.get(...)` wrapped in `tryGet` —
   surfaces register **defensively** and silently don't mount if the service is
   absent. Registrations go through `ctx.effect(fn, label)` for cleanup.
