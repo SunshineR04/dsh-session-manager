@@ -125,8 +125,14 @@ dsh --profile <test-profile> --help           # 完整启动（headless 模板�
 cp scripts/e2e-seed.local.example.json scripts/e2e-seed.local.json
 #    ^ 填入你自己的会话/工作区数据（已 gitignore，不会提交）
 node scripts/e2e-seed.mjs <e2e-home> ~/.dsh          # 1. 播种隔离测试 HOME
-# 2. 在该 HOME 下建 profile 装本插件，再启动测试 web 实例：
-#    DSH_HOME=<e2e-home> dsh --profile sm-test --port 43123 --no-open
+# 2. 在该 HOME 下建 profile 装本插件，再启动测试 web 实例。
+#    ⚠ 桌面版 `dsh` 启动器把 DSH_HOME 写死为真实 home，因此前缀
+#    DSH_HOME=<e2e-home> 并不能隔离（已实测：profile 会落到真实 home）。
+#    改为直接调用 CLI 入口——`plugin add` 已实测通过，serve 参数同形：
+#      ELECTRON_RUN_AS_NODE=1 DSH_HOME=<e2e-home> "<DSH Desktop.exe>" --expose-internals \
+#        "<app.asar>/lib/desktop-cli.js" plugin --profile sm-test add <tarball>
+#      ELECTRON_RUN_AS_NODE=1 DSH_HOME=<e2e-home> "<DSH Desktop.exe>" --expose-internals \
+#        "<app.asar>/lib/desktop-cli.js" --profile sm-test --port 43123 --no-open
 node scripts/e2e-check.mjs <打印出的带 token 的 URL>  # 3. 只读检查：三点菜单/设置页
 node scripts/e2e-mutations.mjs <URL> <e2e-home>       # 4. 闭环：恢复→归档→彻底删除
 ```

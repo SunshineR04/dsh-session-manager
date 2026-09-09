@@ -144,8 +144,15 @@ real data) and drives the UI with puppeteer-core + local Chrome:
 cp scripts/e2e-seed.local.example.json scripts/e2e-seed.local.json
 #    ^ fill in your own session/workspace data (gitignored, never committed)
 node scripts/e2e-seed.mjs <e2e-home> ~/.dsh         # 1. seed the isolated test HOME
-# 2. create a profile in that HOME with this plugin, then start the test web instance:
-#    DSH_HOME=<e2e-home> dsh --profile sm-test --port 43123 --no-open
+# 2. create a profile in that HOME with this plugin, then start the test web instance.
+#    ⚠ The desktop `dsh` shim hardcodes DSH_HOME=<real home>, so prefixing the
+#    command with DSH_HOME=<e2e-home> does NOT isolate (verified: the profile
+#    lands in the real home). Invoke the CLI entry directly instead — verified
+#    for `plugin add`; use the same form for the serve flags:
+#      ELECTRON_RUN_AS_NODE=1 DSH_HOME=<e2e-home> "<DSH Desktop.exe>" --expose-internals \
+#        "<app.asar>/lib/desktop-cli.js" plugin --profile sm-test add <tarball>
+#      ELECTRON_RUN_AS_NODE=1 DSH_HOME=<e2e-home> "<DSH Desktop.exe>" --expose-internals \
+#        "<app.asar>/lib/desktop-cli.js" --profile sm-test --port 43123 --no-open
 node scripts/e2e-check.mjs <printed token URL>      # 3. read-only checks: menu item / settings page
 node scripts/e2e-mutations.mjs <URL> <e2e-home>     # 4. closed loop: restore → archive → delete
 ```

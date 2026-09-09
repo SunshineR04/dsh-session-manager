@@ -31,8 +31,14 @@ pnpm test   # node --check on both libs + host unit tests + client render tests
   `makeFixture()`.
 - E2E (`scripts/e2e-*.mjs`) drives a real web instance through puppeteer-core
   with Chrome hard-coded at `C:/Program Files/Google/Chrome/Application/chrome.exe`.
-  It must run against an isolated home seeded by `scripts/e2e-seed.mjs`
-  (`DSH_HOME=<e2e-home>`), never against the real `~/.dsh`. The seed reads
+  It must run against an isolated home seeded by `scripts/e2e-seed.mjs`, never
+  against the real `~/.dsh`. ⚠ **The desktop `dsh.cmd` shim hardcodes
+  `set "DSH_HOME=<real home>"`**, so `DSH_HOME=<e2e-home> dsh ...` does NOT
+  isolate — verified: `dsh plugin add` under that env created the profile in
+  the real home (delete such a profile if it happens; nothing else is touched).
+  Verified isolation recipe — call the CLI entry directly with the env set:
+  `ELECTRON_RUN_AS_NODE=1 DSH_HOME=<e2e-home> "<DSH Desktop.exe>" --expose-internals "<app.asar>\lib\desktop-cli.js" plugin --profile <name> add <pkg>`
+  (installs into `<e2e-home>/profiles/<name>`, real home untouched). The seed reads
   machine-specific data from `scripts/e2e-seed.local.json` (gitignored; copy
   `e2e-seed.local.example.json`) — keep real paths/session ids out of the repo.
 
