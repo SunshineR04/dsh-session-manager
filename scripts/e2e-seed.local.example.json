@@ -1,5 +1,6 @@
 {
-  "_comment": "Copy to scripts/e2e-seed.local.json (gitignored) and fill in your own values. The seed copies real session logs from your $DSH_HOME into an isolated e2e home; sessions must exist in the source home.",
+  "_comment": "Copy to scripts/e2e-seed.local.json (gitignored) and fill in your own values. The seed copies real session logs from your $DSH_HOME into an isolated e2e home; sessions must exist in the source home. 'targetSessionTitle' (optional) names the live session row scripts/e2e-live.mjs drives.",
+  "targetSessionTitle": "<a session row title you will keep opening during the test>",
   "sessions": [
     {
       "project": "--<encoded-project-dir>--",

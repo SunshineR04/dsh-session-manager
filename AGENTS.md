@@ -23,7 +23,12 @@ pnpm test   # node --check on both libs + host unit tests + client render tests
   `lib/client.js`.
 - Host tests mock the dsh seams (`workspaceRegistry`, `sessionController`,
   `sessionPersistence`, live `sessions` store) and use real temp dirs — read
-  `test/host.test.mjs` before changing manager semantics.
+  `test/host.test.mjs` before changing manager semantics. `makeFixture()`
+  points `process.env.DSH_HOME` at the temp home: `dshHome()` honors that env
+  seam first, so without the isolation the pending queue and projcache sweep
+  silently target the REAL `~/.dsh` (and the tests fail on any machine where
+  `DSH_HOME` happens to be set). Keep every fs-touching test behind
+  `makeFixture()`.
 - E2E (`scripts/e2e-*.mjs`) drives a real web instance through puppeteer-core
   with Chrome hard-coded at `C:/Program Files/Google/Chrome/Application/chrome.exe`.
   It must run against an isolated home seeded by `scripts/e2e-seed.mjs`
@@ -64,8 +69,11 @@ plugin row; `dsh plugin add` applies it):
   if host DOM structure changes it must degrade to a no-op, never throw).
 - Client↔host RPC envelope: `{ ok: true, value }` / `{ ok: false, error: { code, message } }`;
   domain errors are `SessionManagerError` with **stable codes**
-  (`session/running`, `session/live`, `session/not-found`, `session/not-archived`,
-  `bad-request`) that both command and tool layers match on.
+  (`session/running`, `session/not-found`, `session/not-archived`,
+  `session/pending`, `session/data-gone`, `registry/unavailable`,
+  `bad-request`, `session-manager/internal`) matched structurally: the RPC
+  client attaches `error.code` to thrown errors (`isRunningError`), tool layer
+  matches on code.
 
 ## Invariants and gotchas
 
@@ -92,8 +100,9 @@ plugin row; `dsh plugin add` applies it):
   public "close session" API — the in-memory summary outlives the delete (its
   owner scope is the session-controller service scope, not the UI view), but
   appends open the log by path and never recreate a deleted directory, so
-  files can go right away. `deleteSession` queues the id first (crash
-  safety), detaches it, keeps it in the archive set as a **tombstone** (the
+  files can go right away. `deleteSession` runs the read-only existence check,
+  then queues the id BEFORE any mutation (crash safety), detaches it, keeps it
+  in the archive set as a **tombstone** (the
   official archive filter hides the lingering summary everywhere), disposes
   files + projcache, emits `api-session/removed`, and reports
   `openAtDelete: true`. The next-boot sweep calls `finishDeferredDeletion`,
@@ -101,14 +110,43 @@ plugin row; `dsh plugin add` applies it):
   already gone). The settings page additionally filters queued ids out of its
   rows (client-side, via `pendingIds`). `deferred/list` reports which queued
   ids are still `recoverable` (artifact dir on disk); `deferred/cancel`
-  (`cancelPending`) drops the marker AND clears the tombstone so canceling
-  never leaves a husk archived forever. Running sessions are refused;
+  (`cancelPending`) clears the tombstone FIRST and only then drops the marker
+  (a registry failure then leaves the entry fully queued and retryable), and
+  REFUSES entries whose files are already gone (`session/data-gone`) —
+  un-tombstoning one would expose the artifact-less lingering summary as an
+  ungrouped row, so the UI's hidden cancel button is a protocol rule, not a
+  convention. `restoreSession` REFUSES queued ids
+  (`session/pending`) — un-tombstoning one would expose an artifact-less husk.
+  Running sessions are refused;
   `allowDeleteRunning: true` force-deletes with cold semantics (no tombstone).
-- `sessionId` is validated by `SESSION_ID_PATTERN` in `rpcHandlerFor` before
-  any filesystem use — keep that guard (path-traversal defense; the raw
-  sessions-root scan relies on it too).
-- **Version is duplicated**: `package.json` and the hardcoded string in the RPC
-  `ping` response in `lib/index.js`. Bump both.
+- **ONE operation mutex serializes every durable mutation** (`withOperationLock`):
+  both the read-modify-write pending-queue file (five entry points: boot
+  timer sweep, ping sweep, `deferred/list` sweep, deletes, cancels) and the
+  archive-set `registryState → setState` windows. Unserialized, a sweep's
+  full-list queue write-back clobbers a marker queued mid-sweep (stranding its
+  tombstone forever), and two concurrent deletes/cancels/restore+sweep pairs
+  read the same archived snapshot and last-write-wins ghost one of them (both
+  shapes proven by probes; both have regression tests). The lock is NOT
+  reentrant: locked bodies (`deleteLocked`, `cancelPending`,
+  `finishDeferredDeletion`) use the `_addPending`/`_removePending` internals,
+  never the public lock-taking wrappers. `readPending` is lock-free by design
+  (atomic-rename writes; callers only ever want a snapshot).
+- `sessionId` is validated by `SESSION_ID_PATTERN` at the **manager choke
+  point** — `assertSessionId` is the first statement of `deleteSession`,
+  `restoreSession` and `cancelPending`, so EVERY entry (RPC channel, agent
+  tools, future surfaces) is covered: the RPC gate alone left the tool path
+  (`execute(args)` → `manager.deleteSession` directly) exposed to model-
+  controlled `../..` ids, which the raw sessions-root scan would have
+  `rm -rf`'d outside the root (proven by probe; guarded by test). The tool
+  JSON Schemas mirror the pattern as `pattern: '^[A-Za-z0-9_-]{4,128}$'`.
+  Public entry points are `async` so a guard failure is always a rejected
+  promise, never a sync throw. `readPending` additionally validates on the
+  way IN (queue file is an input channel: crash leftovers, hand edits,
+  corruption). Keep both guards.
+- **Version is single-sourced**: the RPC `ping` response reports
+  `pluginVersion()`, which reads `package.json` at runtime; the
+  `VERSION_FALLBACK` literal in `lib/index.js` is only a corrupt-manifest
+  safety net. Bumping `package.json` is enough (a host test asserts the match).
 - `package.json → files` is a whitelist; new runtime files must be added there.
 - Config: schema in `lib/index.js` (`Config`); `effectiveConfig()` merges
   per-user overrides from the settings document under namespace
@@ -117,9 +155,9 @@ plugin row; `dsh plugin add` applies it):
   `lib/client.js` — always add a key to **both**. Styling goes through the
   `TOKENS` map (dsw CSS variables with hardcoded fallbacks); the confirm dialog
   is plain DOM, not React, and shared by the settings page and the menu item.
-- Slash-command delete requires the **full session id** (deleting by list index
-  is intentionally rejected — indexes drift). The settings page filters out
-  `origin === 'subagent'` rows.
+- Session ids are addressed only by exact **full session id** (index-based
+  addressing was rejected with the old slash commands — indexes drift). The
+  settings page filters out `origin === 'subagent'` rows.
 - `e2e-artifacts/` and `.dsh-vision-router/` are gitignored artifact/leftover
   dirs — not part of the package, don't commit or clean code into them.
 

@@ -7,15 +7,20 @@ const url = process.argv[2]
 if (!url) process.exit(2)
 const { readFile } = await import('node:fs/promises')
 const { fileURLToPath } = await import('node:url')
-const otherWorkspaceTitle = await (async () => {
+const spec = await (async () => {
   try {
-    const spec = JSON.parse(await readFile(join(dirname(fileURLToPath(import.meta.url)), 'e2e-seed.local.json'), 'utf8'))
-    const titles = spec.workspaces.map((workspace) => workspace.title)
-    return titles.find((title) => title !== 'test') ?? titles[0] ?? 'other'
+    return JSON.parse(await readFile(join(dirname(fileURLToPath(import.meta.url)), 'e2e-seed.local.json'), 'utf8'))
   } catch {
-    return process.env.E2E_OTHER_WORKSPACE ?? 'other'
+    return {}
   }
 })()
+const otherWorkspaceTitle = (() => {
+  const titles = (Array.isArray(spec.workspaces) ? spec.workspaces : []).map((workspace) => workspace.title)
+  return titles.find((title) => title !== 'test') ?? titles[0] ?? process.env.E2E_OTHER_WORKSPACE ?? 'other'
+})()
+// The live session this experiment targets — machine-specific, so it lives in
+// the gitignored local spec (or the env), never in the repo.
+const TITLE = spec.targetSessionTitle ?? process.env.E2E_SESSION_TITLE ?? 'Greeting'
 const browser = await puppeteer.launch({
   executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
   headless: true,
@@ -28,8 +33,6 @@ page.on('console', (m) => {
   if (m.type() === 'error') console.log('[console.error]', String(m.text()).slice(0, 200))
 })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-
-const TITLE = '回收站'
 
 async function rowRect(titleFragment) {
   return page.evaluate((frag) => {

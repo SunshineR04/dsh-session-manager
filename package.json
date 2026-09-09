@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-manager",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "DSH plugin: manage archived sessions — list, restore, permanently delete, a first-class Settings page and a red delete button in the session context menu.",
   "license": "MIT",
   "type": "module",

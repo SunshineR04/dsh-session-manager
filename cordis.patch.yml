@@ -5,8 +5,9 @@
 # cordis.patch.yml, --patch overlays) override these rows by id.
 #
 # The host row is purely additive: it registers the `/session-manager` RPC
-# channel, the `/sessions` slash-command family and the session-management
-# agent tools. No core row is touched, no core behavior is disabled.
+# channel and the session-management agent tools (the `/sessions` slash-command
+# family was removed in v0.3.0). No core row is touched, no core behavior is
+# disabled.
 - insert:
     - id: session-manager
       name: dsh-session-manager

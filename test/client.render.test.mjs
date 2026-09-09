@@ -66,9 +66,11 @@ async function renderSection(rpc, sessionsOverride) {
   document.body.appendChild(container)
   const root = createRoot(container)
   await act(async () => { root.render(React.createElement(section(), { t: (key) => key, rpc, sessions: sessionsOverride ?? sessions, workspaces })) })
-  await act(async () => { await Promise.resolve() })
-  await act(async () => { await Promise.resolve() })
-  return { text: container.textContent, container, cleanup: () => { root.unmount(); container.remove() } }
+  // Macrotask flush: the mount effects (deferred/list, ping) settle through
+  // promise chains + the host RPC envelope; a plain microtask turn is not
+  // enough to drain the resulting state updates inside act().
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+  return { text: container.textContent, container, cleanup: async () => { await act(async () => { root.unmount() }); container.remove() } }
 }
 
 test('settings section renders rows and filters tombstoned (queued) ids', async () => {
@@ -85,7 +87,7 @@ test('settings section renders rows and filters tombstoned (queued) ids', async 
     assert.ok(text.includes('pendingFinalizing'), 'data-gone entry shows the finalizing hint')
     assert.ok(!text.includes('pendingCancel'), 'data-gone entry offers no cancel button')
   } finally {
-    cleanup()
+    await cleanup()
   }
 })
 
@@ -100,7 +102,7 @@ test('recoverable pending entry keeps its cancel button', async () => {
     assert.ok(text.includes('pendingCancel'), 'recoverable entry offers cancel deletion')
     assert.ok(!text.includes('pendingFinalizing'), 'no finalizing hint for a recoverable entry')
   } finally {
-    cleanup()
+    await cleanup()
   }
 })
 
@@ -129,6 +131,60 @@ test('refresh button spins while a refresh is in flight', async () => {
     assert.equal(container.querySelector('span[style*="sm-spin"]'), null, 'spin stops after the minimum turn')
     assert.equal(button.disabled, false, 'button re-enabled after the refresh')
   } finally {
-    cleanup()
+    await cleanup()
+  }
+})
+
+test('confirm dialog: cancel-focused safe defaults, Enter never confirms, Delete click does', async () => {
+  const calls = []
+  const rpc = (endpoint, payload) => {
+    calls.push([endpoint, payload && payload.sessionId])
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
+    if (endpoint === 'ping') return Promise.resolve({ version: '0.3.0', menuDeleteAvailable: true })
+    return new Promise(() => {})
+  }
+  const { container, cleanup } = await renderSection(rpc)
+  // The dialog self-checks its overlay covers the viewport (degraded-CSS
+  // defense); jsdom reports all-zero rects, so emulate a laid-out page.
+  const originalRect = window.HTMLElement.prototype.getBoundingClientRect
+  window.HTMLElement.prototype.getBoundingClientRect = () => ({ x: 0, y: 0, top: 0, left: 0, width: 1200, height: 800, bottom: 800, right: 1200, toJSON() {} })
+  try {
+    const deleteButton = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'delete')
+    assert.ok(deleteButton, 'row delete button renders')
+    await act(async () => { deleteButton.click(); await new Promise((resolve) => setTimeout(resolve, 0)) })
+    const overlay = document.querySelector('[data-sm-confirm]')
+    assert.ok(overlay, 'the irreversible-delete confirm opens')
+    const buttons = [...overlay.querySelectorAll('button')]
+    const cancelButton = buttons.find((b) => (b.textContent || '').trim() === 'cancel')
+    const confirmButton = buttons.find((b) => (b.textContent || '').trim() === 'confirm')
+    assert.ok(cancelButton && confirmButton, 'both dialog buttons render')
+    assert.equal(document.activeElement, cancelButton, 'cancel carries the default focus')
+
+    // Enter alone must NOT confirm an irreversible physical delete.
+    await act(async () => {
+      document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
+    assert.ok(document.querySelector('[data-sm-confirm]'), 'Enter does not dismiss the dialog')
+    assert.ok(!calls.some(([endpoint]) => endpoint === 'delete'), 'Enter never reaches the host RPC')
+
+    // Escape cancels.
+    await act(async () => {
+      document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+    assert.equal(document.querySelector('[data-sm-confirm]'), null, 'Escape closes the dialog')
+    assert.ok(!calls.some(([endpoint]) => endpoint === 'delete'), 'Escape performs no delete')
+
+    // An explicit Delete click still performs the delete.
+    await act(async () => { deleteButton.click(); await new Promise((resolve) => setTimeout(resolve, 0)) })
+    const overlay2 = document.querySelector('[data-sm-confirm]')
+    assert.ok(overlay2, 'the dialog reopens for a fresh decision')
+    await act(async () => {
+      ;[...overlay2.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'confirm').click()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    assert.ok(calls.some(([endpoint, id]) => endpoint === 'delete' && id === ID), 'explicit Delete click calls the RPC')
+  } finally {
+    window.HTMLElement.prototype.getBoundingClientRect = originalRect
+    await cleanup()
   }
 })

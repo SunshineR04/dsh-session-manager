@@ -3,5 +3,6 @@ e2e-artifacts/
 .dsh-vision-router/
 .DS_Store
 *.log
+*.tgz
 scripts/e2e-seed.local.json
 .zcode/

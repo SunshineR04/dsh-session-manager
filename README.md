@@ -65,21 +65,26 @@ bundle channel above is easier):
 
 Deleting runs in this order:
 
-1. **Registry bookkeeping first (durable + broadcast)**: detaches the id from
+1. **Open sessions only**: a persistent pending-deletion marker is written
+   **before any mutation** (crash safety — a crash mid-delete always leaves
+   the next boot a marker to sweep), right after the read-only existence
+   check; malformed ids read back from that queue file are pattern-validated
+   before any filesystem use.
+2. **Registry bookkeeping (durable + broadcast)**: detaches the id from
    its workspace's `sessionIds` and removes it from the global archive set.
    The detach does not trust the workspace's filtered `sessionIds` view alone —
    a stale registry header index can hide the id from that getter (which used
    to let deleted sessions survive, resurfacing as *ungrouped* entries), so
    the raw workspace record is checked as a fallback.
-2. Removes the session artifact directory
+3. Removes the session artifact directory
    `~/.dsh/sessions/<encoded-project>/<session-id>/` (`session.jsonl.zstd`).
    The directory is resolved through three seams in turn — registry header +
    persistence `locate`, the persistence header listing, then a raw scan of
    the sessions root for a directory named exactly the session id — so a
    degenerated header seam can no longer silently skip the deletion.
-3. Removes the metadata checkpoint
+4. Removes the metadata checkpoint
    `~/.dsh/storages/session_projcache/sessions/<id>.json` (and `.bak-*`).
-4. **Broadcasts the official `api-session/removed` event**, so every connected
+5. **Broadcasts the official `api-session/removed` event**, so every connected
    client drops the session from its list store immediately. (The host itself
    only emits this event when a live session is disposed, which a cold delete
    never is.)
@@ -99,18 +104,23 @@ attachments are content-addressed and intentionally kept.
   restart finishes the cleanup. Running sessions are still refused.
 - **Pending banner**: the settings page lists sessions marked for deletion.
   Entries whose files are already gone (normal open-session deletes) show a
-  "deleted · cleaned up after restart" hint with no cancel; only entries with
-  files still on disk (e.g. a mid-delete crash leftover) offer **Cancel
-  deletion**, which clears the tombstone as well.
+  "deleted · cleaned up after restart" hint with no cancel — and canceling one
+  is refused by the host too (`session/data-gone`), not just hidden by the UI.
+  Only entries with files still on disk (e.g. a mid-delete crash leftover)
+  offer **Cancel deletion**, which clears the tombstone as well (registry
+  first, marker second, so a failure leaves the entry fully retryable).
 - Restore only removes the id from the archive set — archiving keeps the
   workspace `sessionIds` slot, so the session returns to its previous position.
+  A queued-for-deletion id is refused with `session/pending` (cancel it first
+  when its files are still on disk); restoring one would expose an
+  artifact-less husk.
 
 ## Config
 
 | Field | Default | Description |
 | --- | --- | --- |
 | `sessionListLimit` | `500` | Max entries per list call |
-| `allowDeleteRunning` | `false` | Allow deleting live sessions (dangerous) |
+| `allowDeleteRunning` | `false` | Force-delete sessions with a **running** task (skips the refusal and the tombstone — dangerous; open-**idle** sessions delete immediately either way) |
 | `toolDeleteRequiresConfirm` | `true` | Agent delete tool requires `confirm: true` |
 | `menuDeleteAvailable` | `true` | Mount the red menu item |
 

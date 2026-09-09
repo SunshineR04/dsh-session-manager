@@ -74,6 +74,7 @@ const rowRect = await page.evaluate(() => {
     const label = b.getAttribute('aria-label') || ''
     return label.includes('的操作') && !label.includes('工作区')
   })
+  if (!ellipsis) return null
   let node = ellipsis.parentElement
   while (node && node !== document.body) {
     const r = node.getBoundingClientRect()
