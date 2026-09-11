@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createSessionManager, rpcHandlerFor, SessionManagerError, apply, registerTools } from '../lib/index.js'
+import { createSessionManager, rpcHandlerFor, rpcRouteHandler, SessionManagerError, apply, registerTools, RPC_ENDPOINTS, RPC_NAMESPACE, CHANNEL } from '../lib/index.js'
 
 // ---------------------------------------------------------------------------
 
@@ -576,23 +576,31 @@ test('agent tools register and the delete tool requires confirm', async () => {
   assert.deepEqual(state.archivedSessionIds, [])
 })
 
-test('apply mounts the rpc channel and surfaces defensively', () => {
+test('apply mounts one exact fetch route per endpoint and never takes the /api interceptor', () => {
   const fixturePromise = makeFixture()
   return fixturePromise.then((fixture) => {
     const { ctx } = makeCtx({ fixture })
-    let registered = null
-    // Host composition: the RPC surface mounts through the shared `/api`
-    // interceptor on the connection service, inside an injected child fiber.
+    const routes = new Map()
+    let interceptorTaken = false
+    // Host composition: the RPC surface mounts through `connection.fetch`
+    // EXACT routes. `rpc.intercept('/api')` is a single-slot channel owned by
+    // the official dsh-api-gateway — taking it would kill every host RPC.
     ctx.services.connection = {
+      fetch: {
+        register: (route) => { routes.set(route.path, route) },
+      },
       rpc: {
-        intercept: (channel, matches, handler) => { registered = { channel, matches, handler } },
+        intercept: () => { interceptorTaken = true },
       },
     }
     apply(ctx, {})
-    assert.equal(registered.channel, '/api')
-    assert.equal(registered.matches('session-manager/ping'), true)
-    assert.equal(registered.matches('other/endpoint'), false)
-    assert.equal(typeof registered.handler, 'function')
+    assert.equal(interceptorTaken, false, 'the shared /api interceptor must stay untouched')
+    assert.deepEqual([...routes.keys()].sort(), RPC_ENDPOINTS.map((endpoint) => `${CHANNEL}/${endpoint}`).sort())
+    for (const route of routes.values()) {
+      assert.deepEqual(route.methods, ['POST'])
+      assert.equal(route.requestBody, 'buffered')
+      assert.equal(typeof route.fetch, 'function')
+    }
   })
 })
 
@@ -606,4 +614,36 @@ test('apply stays offline without the connection service but still mounts tools'
     apply(ctx, {})
     assert.ok(warnings.some((message) => message.includes('connection')), 'missing connection is reported as a warning')
   })
+})
+
+test('the fetch route envelope round-trips ping and rejects a mismatched method', async () => {
+  const fixture = await makeFixture()
+  const { ctx } = makeCtx({ fixture })
+  const manager = createSessionManager(ctx, {})
+  const fetch = rpcRouteHandler(manager, 'ping')
+
+  const call = (body, { contentType = 'application/json', method = 'POST' } = {}) => fetch(new Request(`http://dsh.internal${CHANNEL}/ping`, {
+    method,
+    headers: contentType === null ? {} : { 'content-type': contentType },
+    ...(method === 'POST' && contentType !== null ? { body: JSON.stringify(body) } : {}),
+  }))
+
+  const good = await call({ type: 'client-request', rpcId: 'r-1', method: `${RPC_NAMESPACE}/ping`, payload: {} })
+  assert.equal(good.status, 200)
+  const envelope = await good.json()
+  assert.equal(envelope.type, 'server-response')
+  assert.equal(envelope.rpcId, 'r-1')
+  assert.equal(envelope.result.ok, true)
+  assert.equal(envelope.result.value.plugin, 'session-manager')
+
+  const mismatched = await call({ type: 'client-request', rpcId: 'r-2', method: `${RPC_NAMESPACE}/list`, payload: {} })
+  const mismatchEnvelope = await mismatched.json()
+  assert.equal(mismatchEnvelope.rpcId, 'r-2')
+  assert.equal(mismatchEnvelope.result.ok, false)
+  assert.equal(mismatchEnvelope.result.error.code, 'bad-request')
+  // The client's parser requires an object here, not a missing field.
+  assert.deepEqual(mismatchEnvelope.result.error.details, {})
+
+  assert.equal((await call({}, { method: 'GET' })).status, 405)
+  assert.equal((await call({}, { contentType: 'text/plain' })).status, 415)
 })

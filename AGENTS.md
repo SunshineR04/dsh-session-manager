@@ -48,18 +48,33 @@ Two runtime halves plus a bundle patch (`cordis.patch.yml` merely inserts the
 plugin row; `dsh plugin add` applies it):
 
 - **`lib/index.js` — host (Node, Cordis plugin)**. `apply(ctx, config)` mounts:
-  an RPC interceptor under the shared `/api` prefix
-  (`connection.rpc.intercept('/api', matches, handler)` claiming the
-  `session-manager/` endpoint namespace — the same shape the official
-  dsh-api-gateway uses) and agent tools (`tools.register`).
-  ⚠ 0.1.5-rc host compatibility: the old
-  `rpc.handle('/session-manager')` prefix route silently never mounted (its
-  route registration resolves `webServer` through the CALLING plugin's fiber
-  chain, where a sibling service is invisible), and `export default apply`
-  made the Loader's `unwrapExports` discard any `inject` export. Keep the
-  named `apply` export, `RPC_NAMESPACE`, the `ctx.inject(['connection'], …)`
-  registration, and the client's `CHANNEL = '/api'` +
-  `NS/<endpoint>` calling convention in lockstep.
+  one **exact fetch route per endpoint** on the connection service
+  (`connection.fetch.register({ path: `${CHANNEL}/${endpoint}`, methods:
+  ['POST'], requestBody: 'buffered', fetch })` — the shape the official
+  dsh-session-log-export uses) and agent tools (`tools.register`).
+  ⚠ 0.1.5-rc host compatibility, three traps in one place — keep all three
+  invariants or the whole surface silently dies:
+  1. **Never call `connection.rpc.intercept('/api', …)`.** That channel holds
+     exactly ONE interceptor and the official dsh-api-gateway already owns it
+     (`registerInterceptor` throws on a second registration). 0.3.2 took the
+     slot and the gateway's registration was refused in the same pass: EVERY
+     host RPC (`session/list`, `workspace/list`, the whole sidebar) answered
+     404 while this plugin's own endpoints kept working — a silent, total
+     host-wide outage. Exact routes are keyed per path, coexist with the
+     gateway, and are matched before the interceptor.
+  2. The older `rpc.handle('/session-manager')` prefix route silently never
+     mounted either: its route registration resolves `webServer` through the
+     CALLING plugin's fiber chain, where a sibling service is invisible.
+  3. Keep this module free of `export default`: the Loader's `unwrapExports`
+     prefers `module.default`, so a bare function export carries no plugin
+     metadata (this is why `apply` is a named export).
+  The route handler builds the full `{ type: 'server-response', rpcId,
+  result }` envelope itself (`rpcRouteHandler`), mirroring the connection
+  plugin's own wire shape — including an object `error.details`, which the
+  browser half's parser rejects as a transport-shaped TypeError when missing.
+  `RPC_ENDPOINTS` is the single source for the registration loop, and the
+  client's `CHANNEL = '/api'` + `${NS}/${endpoint}` method/path pair must stay
+  in lockstep with it.
   The `/sessions` slash-command family was REMOVED in v0.3.0: the desktop host
   has no slash surface, and the Settings page / context menu / agent tools
   are the intended UX. Do not re-add command registrations unless the host
