@@ -73,7 +73,7 @@ async function renderSection(rpc, sessionsOverride, workspacesOverride) {
   return { text: container.textContent, container, cleanup: async () => { await act(async () => { root.unmount() }); container.remove() } }
 }
 
-test('settings section renders rows and filters tombstoned (queued) ids', async () => {
+test('settings section renders rows and collapses cleaned-up (data-gone) pending ids', async () => {
   const rpc = (endpoint) => {
     if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [TOMBSTONE], recoverable: [] })
     if (endpoint === 'ping') return Promise.resolve({ version: '0.2.0', menuDeleteAvailable: true })
@@ -83,9 +83,57 @@ test('settings section renders rows and filters tombstoned (queued) ids', async 
   try {
     assert.ok(text.includes('Hello world'), 'visible archived row renders')
     assert.ok(!text.includes('unknownSession'), 'tombstoned id without a summary must be filtered out of the rows')
-    assert.ok(text.includes('pendingBanner'), 'pending banner renders')
-    assert.ok(text.includes('pendingFinalizing'), 'data-gone entry shows the finalizing hint')
-    assert.ok(!text.includes('pendingCancel'), 'data-gone entry offers no cancel button')
+    // A cleaned-up entry has nothing left to act on: it collapses into one
+    // summary line (plus an expander) instead of occupying a banner row.
+    assert.ok(text.includes('pendingFinalizedBanner'), 'cleaned-up entries collapse into their own summary line')
+    assert.ok(!text.includes('pendingBanner'), 'the actionable banner heading is not used when nothing is cancellable')
+    assert.ok(!text.includes('pendingCancel'), 'no cancel button without files on disk')
+    assert.ok(!text.includes('pendingFinalizing'), 'the per-entry finalizing row stays collapsed')
+    assert.ok(text.includes('pendingShowFinalized'), 'an expander is offered for the ids')
+    assert.ok(!text.includes(TOMBSTONE), 'the collapsed id is not rendered until expanded')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('expanding the cleaned-up list reveals the ids and their hint', async () => {
+  const rpc = (endpoint) => {
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [TOMBSTONE], recoverable: [] })
+    if (endpoint === 'ping') return Promise.resolve({ version: '0.2.0', menuDeleteAvailable: true })
+    return new Promise(() => {})
+  }
+  const { container, cleanup } = await renderSection(rpc)
+  try {
+    const expander = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'pendingShowFinalized')
+    assert.ok(expander, 'the expander button renders')
+    assert.equal(expander.getAttribute('aria-expanded'), 'false', 'it starts collapsed')
+    await act(async () => { expander.click() })
+    assert.ok(container.textContent.includes(TOMBSTONE), 'expanding reveals the queued id')
+    assert.ok(container.textContent.includes('pendingFinalizing'), 'expanding reveals the per-entry hint')
+    assert.ok(!container.textContent.includes('pendingCancel'), 'a data-gone entry still offers no cancel')
+    const collapse = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'pendingHideFinalized')
+    assert.equal(collapse.getAttribute('aria-expanded'), 'true', 'the expander flips its state')
+    await act(async () => { collapse.click() })
+    assert.ok(!container.textContent.includes(TOMBSTONE), 'collapsing hides the id again')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a mixed queue keeps the actionable rows while collapsing the cleaned-up ones', async () => {
+  const GHOST = 'session-4d5e6f70-8a9b-4c1d-9e2f-3a4b5c6d7e8f'
+  const rpc = (endpoint) => {
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [TOMBSTONE, GHOST], recoverable: [TOMBSTONE] })
+    if (endpoint === 'ping') return Promise.resolve({ version: '0.2.0', menuDeleteAvailable: true })
+    return new Promise(() => {})
+  }
+  const { text, cleanup } = await renderSection(rpc)
+  try {
+    assert.ok(text.includes('pendingBanner'), 'the actionable heading reflects the cancellable count')
+    assert.ok(text.includes('pendingCancel'), 'the recoverable entry keeps its cancel button')
+    assert.ok(text.includes(TOMBSTONE), 'the cancellable id is listed')
+    assert.ok(!text.includes(GHOST), 'the cleaned-up id stays collapsed away')
+    assert.ok(text.includes('pendingShowFinalized'), 'the collapsed group is still discoverable')
   } finally {
     await cleanup()
   }
@@ -100,7 +148,9 @@ test('recoverable pending entry keeps its cancel button', async () => {
   const { text, cleanup } = await renderSection(rpc)
   try {
     assert.ok(text.includes('pendingCancel'), 'recoverable entry offers cancel deletion')
+    assert.ok(text.includes('pendingBanner'), 'the actionable heading is used when something is cancellable')
     assert.ok(!text.includes('pendingFinalizing'), 'no finalizing hint for a recoverable entry')
+    assert.ok(!text.includes('pendingShowFinalized'), 'no cleaned-up expander when every entry is actionable')
   } finally {
     await cleanup()
   }

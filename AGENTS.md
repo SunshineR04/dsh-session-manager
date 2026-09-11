@@ -146,7 +146,11 @@ plugin row; `dsh plugin add` applies it):
   REFUSES entries whose files are already gone (`session/data-gone`) —
   un-tombstoning one would expose the artifact-less lingering summary as an
   ungrouped row, so the UI's hidden cancel button is a protocol rule, not a
-  convention. `restoreSession` REFUSES queued ids
+  convention. The pending banner splits on that same flag: only `recoverable`
+  ids get a row with a **Cancel deletion** button, while cleaned-up ids (the
+  normal open-session delete — the host exposes NO public way to dispose a
+  live session, so the tombstone must stand until the next boot) collapse into
+  one summary line with an optional id expander. `restoreSession` REFUSES queued ids
   (`session/pending`) — un-tombstoning one would expose an artifact-less husk.
   Running sessions are refused;
   `allowDeleteRunning: true` force-deletes with cold semantics (no tombstone).

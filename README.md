@@ -108,13 +108,15 @@ attachments are content-addressed and intentionally kept.
   dies; the id is kept in the archive set as a **tombstone**, so it is hidden
   from the workspace browser and every listing meanwhile, and the next dsh
   restart finishes the cleanup. Running sessions are still refused.
-- **Pending banner**: the settings page lists sessions marked for deletion.
-  Entries whose files are already gone (normal open-session deletes) show a
-  "deleted · cleaned up after restart" hint with no cancel — and canceling one
+- **Pending banner**: the settings page lists only the sessions you can
+  still act on. Entries with files on disk (e.g. a mid-delete crash leftover)
+  get a row with **Cancel deletion**, which clears the tombstone as well
+  (registry first, marker second, so a failure leaves the entry fully
+  retryable). Entries whose files are already gone (the normal open-session
+  delete) have nothing left to act on, so they collapse into a single
+  "already deleted · clears after restart" summary line with an optional
+  expander for their ids instead of occupying the banner — and canceling one
   is refused by the host too (`session/data-gone`), not just hidden by the UI.
-  Only entries with files still on disk (e.g. a mid-delete crash leftover)
-  offer **Cancel deletion**, which clears the tombstone as well (registry
-  first, marker second, so a failure leaves the entry fully retryable).
 - Restore only removes the id from the archive set — archiving keeps the
   workspace `sessionIds` slot, so the session returns to its previous position.
   A queued-for-deletion id is refused with `session/pending` (cancel it first
