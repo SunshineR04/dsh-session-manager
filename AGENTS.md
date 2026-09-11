@@ -48,8 +48,18 @@ Two runtime halves plus a bundle patch (`cordis.patch.yml` merely inserts the
 plugin row; `dsh plugin add` applies it):
 
 - **`lib/index.js` — host (Node, Cordis plugin)**. `apply(ctx, config)` mounts:
-  RPC channel `/session-manager` (`connection.rpc.handle`) and agent tools
-  (`tools.register`).
+  an RPC interceptor under the shared `/api` prefix
+  (`connection.rpc.intercept('/api', matches, handler)` claiming the
+  `session-manager/` endpoint namespace — the same shape the official
+  dsh-api-gateway uses) and agent tools (`tools.register`).
+  ⚠ 0.1.5-rc host compatibility: the old
+  `rpc.handle('/session-manager')` prefix route silently never mounted (its
+  route registration resolves `webServer` through the CALLING plugin's fiber
+  chain, where a sibling service is invisible), and `export default apply`
+  made the Loader's `unwrapExports` discard any `inject` export. Keep the
+  named `apply` export, `RPC_NAMESPACE`, the `ctx.inject(['connection'], …)`
+  registration, and the client's `CHANNEL = '/api'` +
+  `NS/<endpoint>` calling convention in lockstep.
   The `/sessions` slash-command family was REMOVED in v0.3.0: the desktop host
   has no slash surface, and the Settings page / context menu / agent tools
   are the intended UX. Do not re-add command registrations unless the host

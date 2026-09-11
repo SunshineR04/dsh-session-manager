@@ -580,10 +580,30 @@ test('apply mounts the rpc channel and surfaces defensively', () => {
   const fixturePromise = makeFixture()
   return fixturePromise.then((fixture) => {
     const { ctx } = makeCtx({ fixture })
-    let handled = null
-    ctx.services.connection = { rpc: { handle: (channel, handler) => { handled = { channel, handler } } } }
+    let registered = null
+    // Host composition: the RPC surface mounts through the shared `/api`
+    // interceptor on the connection service, inside an injected child fiber.
+    ctx.services.connection = {
+      rpc: {
+        intercept: (channel, matches, handler) => { registered = { channel, matches, handler } },
+      },
+    }
     apply(ctx, {})
-    assert.equal(handled.channel, '/session-manager')
-    assert.equal(typeof handled.handler, 'function')
+    assert.equal(registered.channel, '/api')
+    assert.equal(registered.matches('session-manager/ping'), true)
+    assert.equal(registered.matches('other/endpoint'), false)
+    assert.equal(typeof registered.handler, 'function')
+  })
+})
+
+test('apply stays offline without the connection service but still mounts tools', () => {
+  const fixturePromise = makeFixture()
+  return fixturePromise.then((fixture) => {
+    const warnings = []
+    const { ctx } = makeCtx({ fixture })
+    // No connection service at all: the channel must not mount, the tools must.
+    ctx.logger = { warn: (message) => warnings.push(String(message)), info: () => {} }
+    apply(ctx, {})
+    assert.ok(warnings.some((message) => message.includes('connection')), 'missing connection is reported as a warning')
   })
 })
