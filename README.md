@@ -16,6 +16,12 @@ that gap and adds a red **Delete permanently** item to the session context menu.
   update time, running state
 - **Restore** (returns to its pre-archive position) and red
   **Delete permanently** per session
+- **Select all + bulk delete**: tick rows (or the header checkbox) and delete
+  every selected session in one confirmed action. The run is serial and
+  tolerant: a failing session is reported in full while the rest still go
+  through, sessions with a running task are skipped (the dialog says how many
+  before you commit), and the per-run result is one summary — clean, partially
+  failed, or all-running refused
 - Destructive confirm dialog — every delete is a direct physical delete,
   there is no backup layer
 - Backed by the official session / workspace client stores — fully reactive

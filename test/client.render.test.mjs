@@ -61,11 +61,11 @@ const sessions = {
 }
 const workspaces = { list: makeStore({ items: [{ workspaceId: 'w1', title: 'test', path: 'C:/x', sessionIds: [ID] }], archivedSessionIds: [ID, TOMBSTONE] }) }
 
-async function renderSection(rpc, sessionsOverride) {
+async function renderSection(rpc, sessionsOverride, workspacesOverride) {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
-  await act(async () => { root.render(React.createElement(section(), { t: (key) => key, rpc, sessions: sessionsOverride ?? sessions, workspaces })) })
+  await act(async () => { root.render(React.createElement(section(), { t: (key) => key, rpc, sessions: sessionsOverride ?? sessions, workspaces: workspacesOverride ?? workspaces })) })
   // Macrotask flush: the mount effects (deferred/list, ping) settle through
   // promise chains + the host RPC envelope; a plain microtask turn is not
   // enough to drain the resulting state updates inside act().
@@ -187,4 +187,167 @@ test('confirm dialog: cancel-focused safe defaults, Enter never confirms, Delete
     window.HTMLElement.prototype.getBoundingClientRect = originalRect
     await cleanup()
   }
+})
+
+// ── bulk delete (select-all) ------------------------------------------------
+const ID2 = 'session-9a1f2b3c-4d5e-4f60-8a71-2b3c4d5e6f70'
+const ID3 = 'session-5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7081'
+
+/** Three archived rows: two idle, one running. */
+function bulkFixture() {
+  const byId = {
+    [ID]: { displayTitle: 'Alpha', cwd: 'C:/x', updatedAt: 300, running: false },
+    [ID2]: { displayTitle: 'Beta', cwd: 'C:/x', updatedAt: 200, running: false },
+    [ID3]: { displayTitle: 'Gamma', cwd: 'C:/x', updatedAt: 100, running: true },
+  }
+  const sess = {
+    list: makeStore({ byId, ids: [ID, ID2, ID3], phase: 'ready' }),
+    refreshList: async () => {},
+  }
+  const ws = { list: makeStore({ items: [{ workspaceId: 'w1', title: 'test', path: 'C:/x', sessionIds: [ID, ID2, ID3] }], archivedSessionIds: [ID, ID2, ID3] }) }
+  return { sess, ws }
+}
+
+/** jsdom lays nothing out; the dialog's degraded-CSS self-check needs a rect. */
+function withLayout(fn) {
+  const original = window.HTMLElement.prototype.getBoundingClientRect
+  window.HTMLElement.prototype.getBoundingClientRect = () => ({ x: 0, y: 0, top: 0, left: 0, width: 1200, height: 800, bottom: 800, right: 1200, toJSON() {} })
+  return Promise.resolve().then(fn).finally(() => { window.HTMLElement.prototype.getBoundingClientRect = original })
+}
+
+const rowBoxes = (container) => [...container.querySelectorAll('input[type="checkbox"]')].filter((box) => box.getAttribute('aria-label') !== 'selectAll')
+const rowCheckbox = (container, index) => rowBoxes(container)[index]
+const selectAllBox = (container) => [...container.querySelectorAll('input[type="checkbox"]')].find((box) => box.getAttribute('aria-label') === 'selectAll')
+const bulkButton = (container) => [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim().startsWith('deleteSelected'))
+const idleRpc = (calls, extra) => (endpoint, payload) => {
+  calls.push([endpoint, payload && payload.sessionId])
+  if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
+  if (endpoint === 'ping') return Promise.resolve({ version: '0.3.4', menuDeleteAvailable: true })
+  if (endpoint === 'delete' && extra !== undefined) return extra(payload)
+  if (endpoint === 'delete') return Promise.resolve({ sessionId: payload.sessionId, deleted: true })
+  return new Promise(() => {})
+}
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+const confirmBulk = async (overlay) => {
+  const label = [...overlay.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'deleteBulkConfirmLabel')
+  await act(async () => { label.click(); await settle() })
+}
+
+test('select-all checkbox drives the selection and the delete button count', async () => {
+  const { sess, ws } = bulkFixture()
+  const calls = []
+  const { container, cleanup } = await renderSection(idleRpc(calls), sess, ws)
+  try {
+    assert.ok(selectAllBox(container), 'the select-all checkbox renders')
+    const bulk = bulkButton(container)
+    assert.ok(bulk, 'the bulk delete button renders')
+    assert.equal(bulk.disabled, true, 'bulk delete is disabled with an empty selection')
+    assert.ok(bulk.textContent.includes('deleteSelected'), 'the button localizes its label')
+
+    await act(async () => { rowCheckbox(container, 0).click() })
+    assert.equal(bulkButton(container).disabled, false, 'bulk delete enables once a row is selected')
+    assert.equal(selectAllBox(container).indeterminate, true, 'the header checkbox is indeterminate on a partial selection')
+
+    await act(async () => { selectAllBox(container).click() })
+    assert.equal(selectAllBox(container).checked, true, 'select-all checks every row')
+    assert.equal(selectAllBox(container).indeterminate, false, 'no indeterminate state when all rows are selected')
+    assert.equal(rowBoxes(container).every((box) => box.checked), true, 'every row checkbox mirrors select-all')
+
+    await act(async () => { selectAllBox(container).click() })
+    assert.equal(bulkButton(container).disabled, true, 'a second click clears the selection')
+    assert.equal(rowBoxes(container).some((box) => box.checked), false, 'no row stays checked')
+    assert.ok(!calls.some(([endpoint]) => endpoint === 'delete'), 'selection alone never deletes anything')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('bulk delete deletes the selected idle sessions and skips running ones', async () => {
+  const { sess, ws } = bulkFixture()
+  const calls = []
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(idleRpc(calls), sess, ws)
+    try {
+      await act(async () => { selectAllBox(container).click() })
+      await act(async () => { bulkButton(container).click(); await settle() })
+
+      const overlay = document.querySelector('[data-sm-confirm]')
+      assert.ok(overlay, 'the bulk confirm dialog opens')
+      assert.ok(overlay.textContent.includes('deleteBulkConfirmTitle'), 'the title names the bulk action')
+      assert.ok(overlay.textContent.includes('deleteBulkRunningNote'), 'the dialog warns that running sessions are skipped')
+      const cancel = [...overlay.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'cancel')
+      assert.equal(document.activeElement, cancel, 'cancel keeps the default focus')
+
+      await confirmBulk(overlay)
+
+      const deleted = calls.filter(([endpoint]) => endpoint === 'delete').map(([, id]) => id)
+      assert.deepEqual(deleted, [ID, ID2], 'both idle sessions are deleted, the running one is skipped')
+      assert.ok(!deleted.includes(ID3), 'the running session is never sent to the host')
+      assert.ok(container.textContent.includes('deleteBulkOk'), 'a clean run reports the total')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('cancelling the bulk confirm deletes nothing and keeps the selection', async () => {
+  const { sess, ws } = bulkFixture()
+  const calls = []
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(idleRpc(calls), sess, ws)
+    try {
+      await act(async () => { rowCheckbox(container, 0).click() })
+      await act(async () => { bulkButton(container).click(); await settle() })
+      assert.ok(document.querySelector('[data-sm-confirm]'), 'the dialog opened')
+
+      // Escape cancels — the same safe default as the single-row confirm.
+      await act(async () => { document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+      assert.equal(document.querySelector('[data-sm-confirm]'), null, 'Escape closes the dialog')
+      assert.ok(!calls.some(([endpoint]) => endpoint === 'delete'), 'a cancelled bulk delete performs no host call')
+      assert.equal(rowCheckbox(container, 0).checked, true, 'the selection survives the cancellation')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('a failing session in the batch is reported without aborting the rest', async () => {
+  const { sess, ws } = bulkFixture()
+  const calls = []
+  const rpc = idleRpc(calls, (payload) => {
+    // Beta fails; Alpha still goes through (rows sort newest-first).
+    if (payload.sessionId === ID2) return Promise.reject(new Error('boom'))
+    return Promise.resolve({ sessionId: payload.sessionId, deleted: true })
+  })
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(rpc, sess, ws)
+    try {
+      await act(async () => { rowCheckbox(container, 0).click(); rowCheckbox(container, 1).click() })
+      await act(async () => { bulkButton(container).click(); await settle() })
+      await confirmBulk(document.querySelector('[data-sm-confirm]'))
+      const deleted = calls.filter(([endpoint]) => endpoint === 'delete').map(([, id]) => id)
+      assert.deepEqual(deleted, [ID, ID2], 'the failing session does not stop its neighbours')
+      assert.ok(container.textContent.includes('deleteBulkPartial'), 'the partial failure is reported')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('selecting only running sessions refuses before opening the dialog', async () => {
+  const { sess, ws } = bulkFixture()
+  const calls = []
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(idleRpc(calls), sess, ws)
+    try {
+      // Gamma is the running row (oldest updatedAt, rendered last).
+      await act(async () => { rowCheckbox(container, 2).click() })
+      await act(async () => { bulkButton(container).click(); await settle() })
+      assert.equal(document.querySelector('[data-sm-confirm]'), null, 'no dialog for an all-running selection')
+      assert.ok(container.textContent.includes('deleteBulkAllRunning'), 'the refusal is explained in place')
+      assert.ok(!calls.some(([endpoint]) => endpoint === 'delete'), 'nothing reaches the host')
+    } finally {
+      await cleanup()
+    }
+  })
 })
