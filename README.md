@@ -1,12 +1,33 @@
 # dsh-session-manager
 
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that
-manages **archived sessions**. The official workspace browser only has an
-"archive session" action — archived sessions then disappear from every view,
-with no way to list, restore, or permanently delete them. This plugin fills
-that gap and adds a red **Delete permanently** item to the session context menu.
+**permanently deletes sessions**, with a cross-workspace archived-session list
+to do it from and a red **Delete permanently** item in the session context menu.
 
 [中文文档](README.zh.md)
+
+## What dsh already does, and what this plugin is for
+
+**DeepSeek Harness never deletes a session's files.** Its own *Delete workspace*
+action says so outright: *"This removes "{name}" from the workspace list. The
+folder and session logs will be kept. Its sessions will appear under
+Ungrouped."* A long-lived install therefore accumulates one session directory
+per conversation forever, with no way to reclaim the disk.
+
+**Archive/restore is no longer a gap.** Since dsh 0.1.7 the official product
+ships archive and unarchive in the session ⋯ menu, a sidebar
+**Show archived** / **Archived only** view filter, an undo toast, and an
+admission gate that stops an archived session (and its subagent descendants)
+from running model steps. Use those — this plugin does not try to replace them.
+
+| Capability | Official (dsh 0.1.7) | This plugin |
+| --- | --- | --- |
+| Archive / unarchive | ✅ ⋯ menu, stop-work confirm, undo toast | ✅ |
+| Find archived sessions | ✅ sidebar **Show archived** filter | ✅ one list across **all** workspaces |
+| **Delete session files** | ❌ never | ✅ red **Delete permanently** |
+| Bulk operations | ❌ | ✅ select all + delete in one confirmed run |
+
+Every delete is a **direct physical deletion** — there is no backup layer.
 
 ## Features
 

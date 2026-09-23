@@ -9,11 +9,26 @@ import './client-test-env.mjs'
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 
-const ICON_NAMES = ['IconArchiveOutline20', 'IconCheckOutline16', 'IconLoadingOutline16', 'IconRefreshOutline16', 'IconTrashOutline16', 'IconWarningOutline16']
+// dsh 0.1.7 removed the artboard-suffixed icon exports (`IconArchiveOutline20`,
+// `IconTrashOutline16`, …) for size-neutral names: `Regular` carries the
+// one-pixel artwork at the glyph's own default size, `Medium` the same
+// geometry at a 1.3px stroke, and the `size` prop picks rendered dimensions.
+// The stub is a Proxy so a name the real package does not export fails loudly
+// here instead of arriving as `undefined` and blanking the pane with React
+// error #130 (which is exactly how the 0.1.7 rename broke the plugin).
+const ICON_NAMES = ['IconArchiveOutlineRegular', 'IconCheckOutlineRegular', 'IconLoadingOutlineRegular', 'IconRefreshOutlineRegular', 'IconTrashOutlineRegular', 'IconWarningOutlineRegular']
 const requireShim = (name) => {
   if (name === 'react') return React
   if (name === '@deepseek-ai/dsh-client-ui-primitives') {
-    return Object.fromEntries(ICON_NAMES.map((icon) => [icon, () => null]))
+    const icons = Object.fromEntries(ICON_NAMES.map((icon) => [icon, () => null]))
+    return new Proxy(icons, {
+      get(target, prop) {
+        if (typeof prop === 'string' && !(prop in target)) {
+          throw new Error(`lib/client.js requires @deepseek-ai/dsh-client-ui-primitives.${prop}, which is not a size-neutral icon export — check the name against the installed dsh`)
+        }
+        return target[prop]
+      },
+    })
   }
   throw new Error(`unexpected require: ${name}`)
 }

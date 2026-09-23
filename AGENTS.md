@@ -98,6 +98,21 @@ plugin row; `dsh plugin add` applies it):
   data from the sessions/workspaces client stores) and the session context-menu
   augmentation (MutationObserver + React-fiber resolution — passive by design:
   if host DOM structure changes it must degrade to a no-op, never throw).
+  ⚠ **Every symbol this half pulls out of an official client module is a hard
+  upgrade dependency, and a renamed one arrives as `undefined`, not an error.**
+  dsh 0.1.7 dropped the artboard-suffixed product icons (`IconArchiveOutline20`,
+  `IconTrashOutline16`, …) for size-neutral names: `Regular` keeps the one-pixel
+  artwork at the glyph's own default size, `Medium` is the same geometry at a
+  1.3px stroke, and the `size` prop picks rendered dimensions. The destructure
+  went on yielding `undefined`, so `React.createElement(undefined, …)` threw
+  React error #130 (`slot entry crashed in 'settings.section'`) and the WHOLE
+  settings pane rendered blank while the nav entry, the host RPC and the
+  context menu all stayed healthy — the client module still loaded, so the
+  module roster looked fine. `test/client.render.test.mjs` stubs this module,
+  which is why its 35 green tests could not see it; the stub is now a Proxy
+  that throws on any name outside `ICON_NAMES`, turning the next rename into a
+  loud failure. When dsh is upgraded, re-check these names against the
+  installed `@deepseek-ai/dsh-client-ui-primitives`.
 - Client↔host RPC envelope: `{ ok: true, value }` / `{ ok: false, error: { code, message } }`;
   domain errors are `SessionManagerError` with **stable codes**
   (`session/running`, `session/not-found`, `session/not-archived`,
