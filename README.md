@@ -140,7 +140,9 @@ attachments are content-addressed and intentionally kept.
   copy lingers (and still shows in that open view) until the owning UI scope
   dies; the id is kept in the archive set as a **tombstone**, so it is hidden
   from the workspace browser and every listing meanwhile, and the next dsh
-  restart finishes the cleanup. Running sessions are still refused.
+  restart finishes the cleanup. Sessions with a running task are refused unless
+  `allowDeleteRunning` is on, and that switch skips only the refusal — a forced
+  delete is still tombstoned and queued like any other open-session delete.
 - **Pending banner**: the settings page lists only the sessions you can
   still act on. Entries with files on disk (e.g. a mid-delete crash leftover)
   get a row with **Cancel deletion**, which clears the tombstone as well
@@ -161,7 +163,7 @@ attachments are content-addressed and intentionally kept.
 | Field | Default | Description |
 | --- | --- | --- |
 | `sessionListLimit` | `500` | Max entries per list call |
-| `allowDeleteRunning` | `false` | Force-delete sessions with a **running** task (skips the refusal and the tombstone — dangerous; open-**idle** sessions delete immediately either way) |
+| `allowDeleteRunning` | `false` | Force-delete sessions with a **running** task (skips only the refusal — a forced delete is still tombstoned and queued; dangerous) |
 | `toolDeleteRequiresConfirm` | `true` | Agent delete tool requires `confirm: true` |
 | `menuDeleteAvailable` | `true` | Mount the red menu item |
 

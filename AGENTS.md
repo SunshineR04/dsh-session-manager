@@ -10,17 +10,29 @@ TypeScript, no linter, no bundler. Package manager is **pnpm**; Node >= 20
 
 ```bash
 pnpm install
-pnpm test   # node --check on both libs + host unit tests + client render tests
+pnpm test   # node --check on both libs + host + client render + contract tests
 ```
 
 - `node --test test/` (as written in some docs) **fails on Windows** — Node
-  resolves it as a module path. Pass files explicitly.
+  resolves it as a module path. Pass files explicitly. The file list in
+  `package.json → scripts.test` is therefore the whole truth: a new suite that is
+  not named there never runs, locally or in CI.
 - **`test/client.render.test.mjs` is load-bearing**: it mounts the real
   settings section with React 18 inside jsdom (`test/client-test-env.mjs`
   must be imported before React — the act() flag is captured at import time).
   Client-side render crashes (hook order, TDZ) blank the whole settings pane
   and are invisible to host tests; always run the render tests after touching
-  `lib/client.js`.
+  `lib/client.js`. It takes the section's props from the production `inject:`
+  face (only `rpc` is overridden), so the real `refreshUntilGone` closure is
+  under test, and its service fakes expose the OFFICIAL surface only (`list` +
+  `refresh()`) behind a Proxy that throws on any other name — a method the real
+  service does not carry must fail there, never silently skip in production.
+- **`test/contract.test.mjs`** pins the client's endpoint literals against
+  `RPC_ENDPOINTS` (plus `HOST_ONLY_ENDPOINTS` for routes with no browser caller)
+  and the shared `/api` + `${NS}` → host-prefix composition. Its last test checks
+  the INSTALLED dsh service surface and **skips where dsh is absent** (CI), so it
+  is a local upgrade guard — do not read a green CI run as "the surface was
+  verified".
   Its `makeCtx()` fake keys captured components **by slot name** — `apply()`
   registers into two slots, and the single shared variable this used to be
   would let the last registration win, silently mounting the menu row into
@@ -134,7 +146,7 @@ plugin row; `dsh plugin add` applies it):
   settings pane rendered blank while the nav entry, the host RPC and the
   context menu all stayed healthy — the client module still loaded, so the
   module roster looked fine. `test/client.render.test.mjs` stubs this module,
-  which is why its 35 green tests could not see it; the stub is now a Proxy
+  which is why its green tests could not see it; the stub is now a Proxy
   that throws on any name outside `PRIMITIVE_NAMES` (which includes
   `MenuItemButton`), turning the next rename into a loud failure. When dsh is
   upgraded, re-check these names against the installed
@@ -142,6 +154,23 @@ plugin row; `dsh plugin add` applies it):
   The same class of blind spot hid the rc.2 menu break: the DOM augmentation
   had **zero** tests. The slot registration is a plain component, so it is
   covered — keep it that way.
+  The third instance was the refresh seam: `lib/client.js` called
+  `sessions.refreshList()` for three releases, a name no published client service
+  carries (0.1.5-rc.1, 0.1.7-alpha.1, 0.1.7-rc.1 and 0.1.7-rc.2 all expose only
+  `refresh()`), so every guard skipped and a SUCCESSFUL cold delete reported a
+  failed refresh. `ctx.get('sessions')` hands out the SERVICE, never its internal
+  manager: pull through the module-level `refreshSessionList(sessions)` helper and
+  read the store via `sessions.list`. Never invent a method name on an official
+  service — the fakes and `test/contract.test.mjs` now fail loudly instead.
+- **A slot registrant's `inject()` runs ONCE per entry and its result is cached
+  for that entry's lifetime** (`dsh-client-ui-renderer`: `cachedRootInject` is a
+  WeakMap keyed by the entry, with no invalidation; session-scoped entries cache
+  per binding). Re-rendering — including reopening the "…" menu — returns the
+  same object. So anything a component must react to later has to arrive through
+  an injected HOOK (the slot injects `menuOpenState` and `shortcuts`), and any
+  value read from a closure must be settled before the entry's first render. That
+  is why `menuEnabled` retries its ping in the first seconds rather than waiting
+  for a "later update".
 - Client↔host RPC envelope: `{ ok: true, value }` / `{ ok: false, error: { code, message } }`;
   domain errors are `SessionManagerError` with **stable codes**
   (`session/running`, `session/not-found`, `session/not-archived`,
@@ -152,10 +181,14 @@ plugin row; `dsh plugin add` applies it):
 
 ## Invariants and gotchas
 
-- **Delete order is deliberate**: registry bookkeeping first (detach from its
-  workspace, then remove from the archive set), files second, then a
-  `ctx.emit('api-session/removed', sessionId)` broadcast. A file failure after
-  bookkeeping is a warning, not a resurrection. Do not reorder.
+- **Delete order is deliberate — per path**: `deleteLocked` does registry
+  bookkeeping first (detach from its workspace, then remove from the archive set),
+  files second, then a `ctx.emit('api-session/removed', sessionId)` broadcast.
+  `finishDeferredDeletion` (the boot sweep) disposes files FIRST and does the same
+  accounting afterwards, which is fine because the session is cold there. The
+  load-bearing half in both — detach BEFORE unarchive, so a row never flashes back
+  into the workspace browser — must not be reordered in either. A file failure
+  after bookkeeping is a warning, not a resurrection.
 - **Never trust a single host seam during a destructive op** — this caused the
   0.1.4 field bug where deleted sessions resurfaced as *ungrouped* sidebar
   entries: the real `Workspace.sessionIds` getter filters members through the
@@ -196,8 +229,11 @@ plugin row; `dsh plugin add` applies it):
   live session, so the tombstone must stand until the next boot) collapse into
   one summary line with an optional id expander. `restoreSession` REFUSES queued ids
   (`session/pending`) — un-tombstoning one would expose an artifact-less husk.
-  Running sessions are refused;
-  `allowDeleteRunning: true` force-deletes with cold semantics (no tombstone).
+  A session with a RUNNING task is refused; `allowDeleteRunning: true` skips only
+  that refusal — the delete is still tombstoned and queued. `isOpen` alone decides
+  the treatment (tombstone, pending marker, `openAtDelete`); folding the flag into
+  it used to strip the tombstone from open-idle deletes too, which is exactly the
+  resurrection shape the tombstone exists to prevent.
 - **ONE operation mutex serializes every durable mutation** (`withOperationLock`):
   both the read-modify-write pending-queue file (five entry points: boot
   timer sweep, ping sweep, `deferred/list` sweep, deletes, cancels) and the
