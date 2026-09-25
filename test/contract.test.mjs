@@ -84,22 +84,51 @@ const installedClientModule = () => {
   return candidates.find((candidate) => existsSync(candidate))
 }
 
+/**
+ * The contract this plugin has with the OFFICIAL module, as a pure predicate so
+ * the guard itself can be tested (see the fixtures below).
+ *
+ * It asserts the SURFACE — the service is provided, it carries a zero-argument
+ * `refresh()` (the entry `lib/client.js` calls), and the snapshot keys we read —
+ * and deliberately NOT the delegation body. `refresh() { return
+ * this.manager.refreshList(); }` is an implementation detail: pinning it turns a
+ * harmless upstream refactor into a red CI while the entry we call is still
+ * there, and the failure direction we care about is a MISSING entry.
+ */
+function assertServiceSurface(source, label) {
+  assert.ok(source.includes('provide("sessions"'), `${label}: no longer provides the sessions service`)
+  assert.match(source, /refresh\(\)\s*\{/, `${label}: no longer exposes a service-level refresh() — lib/client.js calls it`)
+  for (const key of ['byId', 'phase']) {
+    assert.ok(source.includes(key), `${label}: no longer carries the list snapshot key "${key}"`)
+  }
+}
+
+const SURFACE_FIXTURES = {
+  // The shape shipped today (0.1.5-rc.1 … 0.1.7-rc.2 all match it).
+  current: 'reflect.provide("sessions", this, void 0);\n\t\t\trefresh() { return this.manager.refreshList(); }\nbyId phase',
+  // A harmless upstream refactor: the service entry stays, delegation moves.
+  refactored: 'reflect.provide("sessions", this, void 0);\n\t\t\trefresh() { return this.manager.reload(); }\nbyId phase',
+  // The entry this plugin calls, gone.
+  missingRefresh: 'reflect.provide("sessions", this, void 0);\n\t\t\trefreshProjections() {}\nbyId phase',
+}
+
+test('the surface predicate keeps the entry this plugin calls, and nothing more', () => {
+  // Both shapes that KEEP `refresh()` must pass: relaxing the assertion must not
+  // blind the guard.
+  assertServiceSurface(SURFACE_FIXTURES.current, 'current')
+  assertServiceSurface(SURFACE_FIXTURES.refactored, 'refactored')
+  // Losing the entry, or the service itself, must still fail loudly.
+  assert.throws(() => assertServiceSurface(SURFACE_FIXTURES.missingRefresh, 'fixture'), /refresh\(\)/)
+  assert.throws(() => assertServiceSurface('nothing here', 'fixture'), /sessions service/)
+})
+
 test('the installed dsh client service still carries the surface this plugin uses', (t) => {
   const modulePath = installedClientModule()
   if (modulePath === undefined) {
     t.skip('no installed dsh client module found — set DSH_CLIENT_MODULE to point at one (this guard is local-only)')
     return
   }
-  const source = readFileSync(modulePath, 'utf8')
-  assert.ok(source.includes('provide("sessions"'), `${modulePath} no longer provides the sessions service`)
-  assert.match(
-    source,
-    /refresh\(\)\s*\{\s*return this\.manager\.refreshList\(\)/,
-    `${modulePath} no longer exposes refresh() on the service — lib/client.js calls it`,
-  )
-  for (const key of ['byId', 'phase']) {
-    assert.ok(source.includes(key), `${modulePath} no longer carries the list snapshot key "${key}"`)
-  }
+  assertServiceSurface(readFileSync(modulePath, 'utf8'), modulePath)
   const workspaceModule = join(dirname(modulePath), '..', '..', 'dsh-api-workspace-controller', 'lib', 'client.js')
   if (existsSync(workspaceModule)) {
     const workspaceSource = readFileSync(workspaceModule, 'utf8')

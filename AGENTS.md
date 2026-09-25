@@ -29,10 +29,12 @@ pnpm test   # node --check on both libs + host + client render + contract tests
   service does not carry must fail there, never silently skip in production.
 - **`test/contract.test.mjs`** pins the client's endpoint literals against
   `RPC_ENDPOINTS` (plus `HOST_ONLY_ENDPOINTS` for routes with no browser caller)
-  and the shared `/api` + `${NS}` → host-prefix composition. Its last test checks
-  the INSTALLED dsh service surface and **skips where dsh is absent** (CI), so it
-  is a local upgrade guard — do not read a green CI run as "the surface was
-  verified".
+  and the shared `/api` + `${NS}` → host-prefix composition. Its installed-module
+  check goes through a pure `assertServiceSurface()` predicate carrying three
+  inline fixtures: two shapes that KEEP `refresh()` (including an upstream
+  refactor of its delegation body) must pass, a missing entry must fail — so
+  relaxing that assertion can never silently blind it. It **skips where dsh is
+  absent** (CI), so do not read a green CI run as "the surface was verified".
   Its `makeCtx()` fake keys captured components **by slot name** — `apply()`
   registers into two slots, and the single shared variable this used to be
   would let the last registration win, silently mounting the menu row into
@@ -270,6 +272,11 @@ plugin row; `dsh plugin add` applies it):
   `lib/client.js` — always add a key to **both**. Styling goes through the
   `TOKENS` map (dsw CSS variables with hardcoded fallbacks); the confirm dialog
   is plain DOM, not React, and shared by the settings page and the menu item.
+  It admits **one dialog at a time** (a second request resolves as `null`, i.e.
+  "cancelled", so no existing caller path changes), gives each instance a fresh
+  `aria-labelledby` id (a fixed id would resolve to whichever overlay came
+  first), and hands focus back to the element that opened it on close — the menu
+  path's opener is unmounted by then, hence the `document.contains` check.
 - Session ids are addressed only by exact **full session id** (index-based
   addressing was rejected with the old slash commands — indexes drift). The
   settings page filters out `origin === 'subagent'` rows.

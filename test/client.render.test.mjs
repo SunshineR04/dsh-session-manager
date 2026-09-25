@@ -46,7 +46,7 @@ assert.equal(typeof mod.apply, 'function')
 assert.deepEqual(mod.inject, ['slots', 'locale'])
 const act = React.act ?? ((fn) => fn())
 
-function makeCtx() {
+function makeCtx(registry = services) {
   const components = new Map()
   const specs = new Map()
   let dict = null
@@ -57,7 +57,8 @@ function makeCtx() {
     // Services resolve through this mutable registry: the fakes below mirror the
     // OFFICIAL client surface, so a component that asks for something the real
     // service does not carry fails loudly instead of silently skipping.
-    get: (name) => services[name],
+    // A second ctx can be given its own registry (see the retry/debounce tests).
+    get: (name) => registry[name],
     effect: (fn) => fn(),
     logger: {},
     slots: {
@@ -864,4 +865,125 @@ test('the zh and en dictionaries carry exactly the same keys', () => {
       assert.ok(String(value).trim() !== '', `${language}.${key} must not be empty`)
     }
   }
+})
+
+// ── timing and identity rules ───────────────────────────────────────────────
+//
+// The ping retry, the removal debounce and the one-dialog rule are not visible
+// in a rendered snapshot, and were previously covered only by reading the code.
+// They drive a SECOND client registration — `mod.apply` is re-invocable and every
+// RPC closure reads `ctx.get` per apply — with its own service registry, so each
+// test controls the clock and the failure sequence exactly.
+
+/** Flush microtasks without touching the mocked timer queue. */
+const flush = () => new Promise((resolve) => setImmediate(resolve))
+const OK_PING = { ok: true, value: { menuDeleteAvailable: true } }
+
+test('the menu ping retries twice, so a transient failure cannot hide the row', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const attempts = []
+  const flaky = makeCtx({
+    sessions: undefined,
+    workspaces: undefined,
+    remote: undefined,
+    connection: { rpc: { call: async (_channel, method) => {
+      attempts.push(method)
+      if (attempts.length < 3) throw new Error('transient')
+      return OK_PING
+    } } },
+  })
+  mod.apply(flaky.ctx)
+  await flush()
+  assert.equal(attempts.length, 1, 'the first ping is attempted right away')
+  assert.equal(flaky.menuSpec().inject().menuEnabled, null, 'nothing is decided while a retry is pending')
+  t.mock.timers.tick(1000)
+  await flush()
+  assert.equal(attempts.length, 2, 'the first retry fires after 1s')
+  t.mock.timers.tick(3000)
+  await flush()
+  assert.equal(attempts.length, 3, 'the second retry fires 3s later')
+  assert.equal(flaky.menuSpec().inject().menuEnabled, true, 'the retries settle the value before the entry first renders')
+})
+
+test('the menu ping gives up after the retries and keeps the row hidden', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let attempts = 0
+  const dead = makeCtx({
+    sessions: undefined,
+    workspaces: undefined,
+    remote: undefined,
+    connection: { rpc: { call: async () => { attempts += 1; throw new Error('down') } } },
+  })
+  mod.apply(dead.ctx)
+  await flush()
+  t.mock.timers.tick(1000)
+  await flush()
+  t.mock.timers.tick(3000)
+  await flush()
+  assert.equal(attempts, 3, 'three attempts in total, then it stops')
+  assert.equal(dead.menuSpec().inject().menuEnabled, false, 'an unconfirmed row stays hidden instead of appearing anyway')
+})
+
+test('a burst of api-session/removed events collapses into one pull', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let handler = null
+  let pulls = 0
+  const counting = makeSessionsService({ byId: {}, ids: [], phase: 'ready' }, { onRefresh: () => { pulls += 1 } })
+  const noisy = makeCtx({
+    sessions: counting,
+    workspaces: undefined,
+    connection: undefined,
+    remote: { $on: (event, callback) => { if (event === 'api-session/removed') handler = callback; return () => {} } },
+  })
+  mod.apply(noisy.ctx)
+  await flush()
+  assert.equal(typeof handler, 'function', 'the plugin subscribes to api-session/removed')
+  handler('session-a')
+  handler('session-b')
+  handler('session-c')
+  assert.equal(pulls, 0, 'the pull waits out the debounce window')
+  t.mock.timers.tick(250)
+  await flush()
+  assert.equal(pulls, 1, 'three events in one burst must cost one pull, not three')
+})
+
+test('one dialog at a time, a fresh label id per dialog, and focus back on the opener', async () => {
+  const { sess, ws } = bulkFixture()
+  const calls = []
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(idleRpc(calls), sess, ws)
+    try {
+      const deletes = [...container.querySelectorAll('button')].filter((b) => (b.textContent || '').trim() === 'delete')
+      assert.ok(deletes.length >= 2, 'the fixture renders at least two row delete buttons')
+      await act(async () => { deletes[0].focus(); deletes[0].click(); await settle() })
+      const first = confirmOverlay()
+      assert.ok(first, 'the first dialog opens')
+      const firstLabel = first.getAttribute('aria-labelledby')
+      assert.equal(document.getElementById(firstLabel)?.textContent, 'deleteConfirmTitle', 'the label resolves to THIS dialog\'s title')
+
+      // jsdom clicks pass through the overlay (a real pointer would hit the
+      // overlay instead), so this exercises the guard rather than the geometry.
+      await act(async () => { deletes[1].click(); await settle() })
+      assert.equal(document.querySelectorAll('[data-sm-confirm]').length, 1, 'a second dialog cannot stack on the first')
+      assert.ok(!calls.some(([endpoint]) => endpoint === 'delete'), 'and nothing was deleted yet')
+
+      await act(async () => {
+        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+        await settle()
+      })
+      assert.equal(confirmOverlay(), null, 'Escape closes the dialog')
+      assert.equal(document.activeElement, deletes[0], 'focus returns to the button that opened it')
+
+      await act(async () => { deletes[0].click(); await settle() })
+      const second = confirmOverlay()
+      assert.ok(second, 'the dialog can be opened again once the first is closed')
+      assert.notEqual(second.getAttribute('aria-labelledby'), firstLabel, 'each dialog labels itself with a fresh id')
+      await act(async () => {
+        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+        await settle()
+      })
+    } finally {
+      await cleanup()
+    }
+  })
 })
