@@ -53,11 +53,17 @@ Hover a session row in the left sidebar → ⋯ menu: below the built-in
 Rename / Fork session / Archive session items, a red **Delete permanently**
 item appears (native danger styling, same confirm dialog).
 
-> The official workspace browser exposes no slot for session menus, so the
-> plugin augments the rendered popup via DOM observation + React-fiber
-> resolution. The augmentation is passive: if the host UI structure changes
-> and resolution fails, the button simply does not appear — nothing else is
-> affected.
+> The row is a normal entry in the official **`sidebar.workspaces.session.menu.item`**
+> slot (id `session-manager-delete`, order 500), rendered with the same
+> `MenuItemButton` primitive the shipped pin / rename / fork / archive rows use —
+> so its danger colors, separator and keyboard behaviour come from the menu
+> itself rather than from a copy of its styling.
+>
+> That slot arrived in dsh 0.1.7-alpha.1. Before it existed this row had to be
+> injected by observing the DOM and resolving the session through the React
+> fiber tree, which meant any change to the menu's markup could drop it
+> silently — 0.1.7-rc.2 appended keyboard-shortcut hints to each row's text and
+> did exactly that.
 
 ### 3. Agent tools
 
@@ -68,6 +74,12 @@ item appears (native danger styling, same confirm dialog).
 | `session_delete_permanently` | Delete by id; **requires `confirm: true`**; refuses running sessions |
 
 ## Install
+
+**Requires the dsh 0.1.7 line** (release candidates included). Both of its hard
+dependencies arrived there: the size-neutral product icons, and the
+`sidebar.workspaces.session.menu.item` slot that the context-menu row registers
+into. On anything older the context-menu row does not mount and the Settings
+page is the only delete path.
 
 ```bash
 git clone https://github.com/SunshineR04/dsh-session-manager.git

@@ -21,6 +21,18 @@ pnpm test   # node --check on both libs + host unit tests + client render tests
   Client-side render crashes (hook order, TDZ) blank the whole settings pane
   and are invisible to host tests; always run the render tests after touching
   `lib/client.js`.
+  Its `makeCtx()` fake keys captured components **by slot name** — `apply()`
+  registers into two slots, and the single shared variable this used to be
+  would let the last registration win, silently mounting the menu row into
+  every settings test. Its primitives stub is a Proxy that throws on any name
+  outside `PRIMITIVE_NAMES`, and stubs `MenuItemButton` as a real clickable
+  `role="menuitem"` button (the icons' bare `() => null` would make the menu
+  row's behaviour unreachable).
+- **dsh 0.1.7 line required.** Both hard dependencies arrived in it: the
+  size-neutral product icons, and the `sidebar.workspaces.session.menu.item`
+  slot (present from 0.1.7-alpha.1 — 0.1.5-rc.1, 0.1.5-rc.3 and 0.1.6-alpha.1
+  do not declare it, so on those the menu row simply does not mount and the
+  settings page is the only delete path).
 - Host tests mock the dsh seams (`workspaceRegistry`, `sessionController`,
   `sessionPersistence`, live `sessions` store) and use real temp dirs — read
   `test/host.test.mjs` before changing manager semantics. `makeFixture()`
@@ -96,8 +108,21 @@ plugin row; `dsh plugin add` applies it):
   `package.json → dsh.client.inject`. UI is `React.createElement` only.
   Two surfaces: the settings section (`ctx.slots.inject('settings.section')`,
   data from the sessions/workspaces client stores) and the session context-menu
-  augmentation (MutationObserver + React-fiber resolution — passive by design:
-  if host DOM structure changes it must degrade to a no-op, never throw).
+  row (`ctx.slots.inject('sidebar.workspaces.session.menu.item')`, order 500,
+  rendered with the official `MenuItemButton`).
+  ⚠ **Never identify an official surface by its text or DOM shape.** The menu
+  row used to be injected by observing the DOM and resolving the session
+  through the React fiber tree, with `Set(['归档会话','Archive session'])`
+  matching each menu item's `textContent`. dsh 0.1.7-rc.2 appended the
+  keyboard-shortcut hint to every row's text (`归档会话` became
+  `归档会话Ctrl+Alt+A`), the match stopped matching, and the red delete row
+  vanished from the menu — with **no error at all**: the client module loaded,
+  the roster listed it, the settings page was healthy, and the augmentation
+  even logged that it was active. The official slot has existed since
+  0.1.7-alpha.1 and hands the row identity over as props; use it.
+  ⚠ **`DeleteSessionMenuItem` must call `props.useMenuOpenState()`
+  unconditionally, before its `menuEnabled` early return.** Reordering those
+  two lines crashes the slot entry with a hook-order error.
   ⚠ **Every symbol this half pulls out of an official client module is a hard
   upgrade dependency, and a renamed one arrives as `undefined`, not an error.**
   dsh 0.1.7 dropped the artboard-suffixed product icons (`IconArchiveOutline20`,
@@ -110,9 +135,13 @@ plugin row; `dsh plugin add` applies it):
   context menu all stayed healthy — the client module still loaded, so the
   module roster looked fine. `test/client.render.test.mjs` stubs this module,
   which is why its 35 green tests could not see it; the stub is now a Proxy
-  that throws on any name outside `ICON_NAMES`, turning the next rename into a
-  loud failure. When dsh is upgraded, re-check these names against the
-  installed `@deepseek-ai/dsh-client-ui-primitives`.
+  that throws on any name outside `PRIMITIVE_NAMES` (which includes
+  `MenuItemButton`), turning the next rename into a loud failure. When dsh is
+  upgraded, re-check these names against the installed
+  `@deepseek-ai/dsh-client-ui-primitives`.
+  The same class of blind spot hid the rc.2 menu break: the DOM augmentation
+  had **zero** tests. The slot registration is a plain component, so it is
+  covered — keep it that way.
 - Client↔host RPC envelope: `{ ok: true, value }` / `{ ok: false, error: { code, message } }`;
   domain errors are `SessionManagerError` with **stable codes**
   (`session/running`, `session/not-found`, `session/not-archived`,
