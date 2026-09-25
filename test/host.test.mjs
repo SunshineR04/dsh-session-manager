@@ -225,18 +225,36 @@ test('deleteSession removes an open idle session at once, tombstoned until the b
   assert.deepEqual(await manager.readPending(), [SESSION_ID])
   assert.ok(events.some(([event, id]) => event === 'api-session/removed' && id === SESSION_ID))
 
-  // live + running agent -> still refused
+  // live + running agent + switch OFF -> refused
   ctx.services.agents = { get: (id) => (id === SESSION_ID ? { status: 'running' } : undefined) }
   const strict = createSessionManager(ctx, {})
   await assert.rejects(strict.deleteSession(SESSION_ID), (error) => error instanceof SessionManagerError && error.code === 'session/running')
 
-  // allowDeleteRunning force-deletes with cold semantics (no tombstone)
-  ctx.services.agents = { get: () => undefined }
+  // live + running agent + switch ON -> forced, and STILL an open-session
+  // delete: tombstoned and queued, never a cold delete. The switch only skips
+  // the refusal.
   const permissive = createSessionManager(ctx, { allowDeleteRunning: true })
   const forced = await permissive.deleteSession(SESSION_ID)
   assert.equal(forced.deleted, true)
-  assert.equal(forced.openAtDelete, undefined)
-  assert.deepEqual(state.archivedSessionIds, [], 'force delete unarchives like a cold delete')
+  assert.equal(forced.openAtDelete, true, 'a forced delete is still an open-session delete')
+  assert.deepEqual(state.archivedSessionIds, [SESSION_ID], 'and it still tombstones, so the lingering summary stays hidden')
+  assert.deepEqual(await permissive.readPending(), [SESSION_ID], 'and it stays queued for the boot sweep')
+})
+
+test('allowDeleteRunning never strips the tombstone from an open idle session either', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers, state } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  const manager = createSessionManager(ctx, { allowDeleteRunning: true })
+  ctx.services.sessions = { get: (id) => (id === SESSION_ID ? {} : undefined) }
+
+  const result = await manager.deleteSession(SESSION_ID)
+  assert.equal(result.openAtDelete, true, 'the switch must not turn an open delete into a cold one')
+  assert.deepEqual(state.archivedSessionIds, [SESSION_ID], 'the tombstone is kept, so the summary cannot resurface as ungrouped')
+  assert.ok((await manager.readPending()).includes(SESSION_ID), 'and the next-boot finish-up is queued')
+  const sessionDir = join(fixture.sessionsRoot, `--${CWD.replace(/[\\/:]/g, '-')}--`, SESSION_ID)
+  assert.equal(existsSync(sessionDir), false, 'the files still go immediately')
 })
 
 test('listArchived hides ids queued for deletion', async () => {
