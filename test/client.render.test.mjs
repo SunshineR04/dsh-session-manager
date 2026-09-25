@@ -49,9 +49,15 @@ const act = React.act ?? ((fn) => fn())
 function makeCtx() {
   const components = new Map()
   const specs = new Map()
+  let dict = null
   const ctx = {
-    locale: { register() {}, bind: () => (key) => key },
-    get: () => undefined,
+    // The locale dictionaries are captured here (production registers the same
+    // object through the same call) so the parity test can compare zh against en.
+    locale: { register(_ns, dictionaries) { dict = dictionaries }, bind: () => (key) => key },
+    // Services resolve through this mutable registry: the fakes below mirror the
+    // OFFICIAL client surface, so a component that asks for something the real
+    // service does not carry fails loudly instead of silently skipping.
+    get: (name) => services[name],
     effect: (fn) => fn(),
     logger: {},
     slots: {
@@ -74,28 +80,110 @@ function makeCtx() {
   return {
     ctx,
     section: () => components.get('settings.section'),
+    sectionSpec: () => specs.get('settings.section'),
     menuItem: () => components.get('sidebar.workspaces.session.menu.item'),
     menuSpec: () => specs.get('sidebar.workspaces.session.menu.item'),
+    dict: () => dict,
   }
 }
 
-const { ctx, section, menuItem, menuSpec } = makeCtx()
+const services = { sessions: undefined, workspaces: undefined, connection: undefined, remote: undefined }
+const { ctx, section, sectionSpec, menuItem, menuSpec, dict } = makeCtx()
 mod.apply(ctx)
 
+// ── service fakes: the OFFICIAL surface only ────────────────────────────────
+//
+// The real `ctx.get('sessions')` service carries `list` (a snapshot store) and
+// `refresh()` — never `refreshList()`, which lives on its internal manager. The
+// guard below is the primitives-guard trick again: a stale name must fail here
+// rather than silently disabling the refresh path in production.
+function guardSurface(target, label) {
+  return new Proxy(target, {
+    get(t, prop) {
+      if (typeof prop === 'string' && !(prop in t)) {
+        throw new Error(`${label}.${String(prop)} is not on the official dsh client service surface — check the installed module`)
+      }
+      return t[prop]
+    },
+  })
+}
+
+/** Static snapshot store (workspaces: push-driven, no public refresh). */
 const makeStore = (snapshot) => ({ subscribe: () => () => {}, getSnapshot: () => snapshot })
+
+/**
+ * Sessions service fake. `onRefresh(snapshot)` may return the next snapshot,
+ * modelling the server list: the default drops the id, which is exactly how the
+ * real `refreshUntilGone` reaches its success path.
+ */
+function makeSessionsService(initial, { onRefresh } = {}) {
+  let snapshot = initial
+  const listeners = new Set()
+  const list = {
+    subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
+    getSnapshot: () => snapshot,
+  }
+  const refresh = async () => {
+    if (typeof onRefresh !== 'function') return
+    const next = await onRefresh(snapshot)
+    if (next === undefined) return
+    snapshot = next
+    for (const listener of [...listeners]) listener()
+  }
+  return guardSurface({ list, refresh }, 'sessions')
+}
+
+/** Refresh hook that removes one id from the snapshot (the server-list effect). */
+const dropsId = (sessionId) => (snapshot) => ({
+  byId: Object.fromEntries(Object.entries(snapshot.byId).filter(([id]) => id !== sessionId)),
+  ids: snapshot.ids.filter((id) => id !== sessionId),
+  phase: snapshot.phase,
+})
+
 const ID = 'session-3012b8a0-1fef-4f34-8d9c-a6c5b7aa84d2'
 const TOMBSTONE = 'session-7c9f1d2e-4a5b-4c8d-9e0f-1a2b3c4d5e6f'
-const sessions = {
-  list: makeStore({ byId: { [ID]: { displayTitle: 'Hello world', cwd: 'C:\\x', updatedAt: 100, running: false } }, ids: [ID], phase: 'ready' }),
-  refreshList: async () => {},
-}
-const workspaces = { list: makeStore({ items: [{ workspaceId: 'w1', title: 'test', path: 'C:/x', sessionIds: [ID] }], archivedSessionIds: [ID, TOMBSTONE] }) }
+const sessions = makeSessionsService(
+  { byId: { [ID]: { displayTitle: 'Hello world', cwd: 'C:\\x', updatedAt: 100, running: false } }, ids: [ID], phase: 'ready' },
+  { onRefresh: dropsId(ID) },
+)
+const workspaces = guardSurface(
+  { list: makeStore({ items: [{ workspaceId: 'w1', title: 'test', path: 'C:/x', sessionIds: [ID] }], archivedSessionIds: [ID, TOMBSTONE] }) },
+  'workspaces',
+)
+services.sessions = sessions
+services.workspaces = workspaces
 
-async function renderSection(rpc, sessionsOverride, workspacesOverride) {
+/**
+ * Point BOTH the component props and the closure's `ctx.get('sessions')` at one
+ * fake. `refreshUntilGone` resolves the service itself, so overriding only the
+ * prop would leave the real polling path talking to the default fake.
+ * @returns a restore function for the test's finally block.
+ */
+function useSessionsService(service) {
+  const previous = services.sessions
+  services.sessions = service
+  return () => { services.sessions = previous }
+}
+
+/**
+ * Mount the settings section with the props PRODUCTION injects — taken from the
+ * registered spec's own inject face, so the real `refreshUntilGone` closure takes
+ * part instead of a test double. Only `rpc` is always overridden; the remaining
+ * overrides exist for the tests that need a different fixture.
+ */
+async function renderSection(rpc, sessionsOverride, workspacesOverride, extraProps) {
+  const base = sectionSpec().inject()
+  const props = {
+    ...base,
+    rpc,
+    ...(sessionsOverride === undefined ? {} : { sessions: sessionsOverride }),
+    ...(workspacesOverride === undefined ? {} : { workspaces: workspacesOverride }),
+    ...(extraProps ?? {}),
+  }
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
-  await act(async () => { root.render(React.createElement(section(), { t: (key) => key, rpc, sessions: sessionsOverride ?? sessions, workspaces: workspacesOverride ?? workspaces })) })
+  await act(async () => { root.render(React.createElement(section(), props)) })
   // Macrotask flush: the mount effects (deferred/list, ping) settle through
   // promise chains + the host RPC envelope; a plain microtask turn is not
   // enough to drain the resulting state updates inside act().
@@ -188,10 +276,10 @@ test('recoverable pending entry keeps its cancel button', async () => {
 
 test('refresh button spins while a refresh is in flight', async () => {
   let resolveRefresh
-  const sessionsRefreshing = {
-    list: sessions.list,
-    refreshList: () => new Promise((resolve) => { resolveRefresh = resolve }),
-  }
+  const sessionsRefreshing = makeSessionsService(
+    sessions.list.getSnapshot(),
+    { onRefresh: () => new Promise((resolve) => { resolveRefresh = resolve }) },
+  )
   const rpc = (endpoint) => {
     if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
     if (endpoint === 'ping') return Promise.resolve({ version: '0.2.1', menuDeleteAvailable: true })
@@ -280,11 +368,10 @@ function bulkFixture() {
     [ID2]: { displayTitle: 'Beta', cwd: 'C:/x', updatedAt: 200, running: false },
     [ID3]: { displayTitle: 'Gamma', cwd: 'C:/x', updatedAt: 100, running: true },
   }
-  const sess = {
-    list: makeStore({ byId, ids: [ID, ID2, ID3], phase: 'ready' }),
-    refreshList: async () => {},
-  }
-  const ws = { list: makeStore({ items: [{ workspaceId: 'w1', title: 'test', path: 'C:/x', sessionIds: [ID, ID2, ID3] }], archivedSessionIds: [ID, ID2, ID3] }) }
+  const sess = makeSessionsService({ byId, ids: [ID, ID2, ID3], phase: 'ready' })
+  const ws = guardSurface({
+    list: makeStore({ items: [{ workspaceId: 'w1', title: 'test', path: 'C:/x', sessionIds: [ID, ID2, ID3] }], archivedSessionIds: [ID, ID2, ID3] }),
+  }, 'workspaces')
   return { sess, ws }
 }
 
@@ -631,4 +718,150 @@ test('the menu item opens one dialog at a time', async () => {
       await cleanup()
     }
   })
+})
+
+// ── the refresh seam, and the dialog/keyboard contract ----------------------
+//
+// The plugin used to call `sessions.refreshList()`, a name no published version
+// of the client service carries (0.1.5-rc.1 / 0.1.7-alpha.1 / 0.1.7-rc.1 /
+// 0.1.7-rc.2 all expose only `refresh()`). Every guard therefore skipped,
+// `refreshUntilGone` answered false immediately, and a SUCCESSFUL cold delete
+// painted "the session list could not refresh" in red. The fakes above now
+// mirror the real surface — the same mistake dies at the Proxy — and these tests
+// pin the user-visible outcome the fix is for.
+
+test('a successful cold delete refreshes through refresh() and reports no failure', async () => {
+  let refreshCalls = 0
+  const counting = makeSessionsService(
+    sessions.list.getSnapshot(),
+    { onRefresh: (snapshot) => { refreshCalls += 1; return dropsId(ID)(snapshot) } },
+  )
+  const calls = []
+  const rpc = (endpoint, payload) => {
+    calls.push([endpoint, payload && payload.sessionId])
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
+    if (endpoint === 'ping') return Promise.resolve({ version: '0.3.8', menuDeleteAvailable: true })
+    if (endpoint === 'delete') return Promise.resolve({ sessionId: payload.sessionId, deleted: true })
+    return new Promise(() => {})
+  }
+  await withLayout(async () => {
+    const restoreSessions = useSessionsService(counting)
+    const { container, cleanup } = await renderSection(rpc)
+    try {
+      const remove = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'delete')
+      assert.ok(remove, 'the row delete button renders')
+      await act(async () => { remove.click(); await settle() })
+      await act(async () => { dialogButton(confirmOverlay(), 'confirm').click(); await settle() })
+
+      assert.ok(calls.some(([endpoint]) => endpoint === 'delete'), 'the delete reached the host')
+      assert.ok(container.textContent.includes('deleteOk'), 'success is still reported')
+      assert.ok(refreshCalls > 0, 'the delete must re-pull the list through the service\'s refresh()')
+      assert.ok(!container.textContent.includes('refreshFailed'), 'a refreshed list must NEVER be reported as a failed refresh')
+    } finally {
+      await cleanup()
+      restoreSessions()
+    }
+  })
+})
+
+test('a delete whose row never disappears still reports the failed refresh', async () => {
+  const rpc = (endpoint, payload) => {
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
+    if (endpoint === 'ping') return Promise.resolve({ version: '0.3.8', menuDeleteAvailable: true })
+    if (endpoint === 'delete') return Promise.resolve({ sessionId: payload.sessionId, deleted: true })
+    return new Promise(() => {})
+  }
+  await withLayout(async () => {
+    // A stub that answers "the row is still there" keeps the assertion instant;
+    // the real polling loop is covered by the test above.
+    const { container, cleanup } = await renderSection(rpc, undefined, undefined, { refreshAfterDelete: async () => false })
+    try {
+      const remove = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'delete')
+      await act(async () => { remove.click(); await settle() })
+      await act(async () => { dialogButton(confirmOverlay(), 'confirm').click(); await settle() })
+      assert.ok(container.textContent.includes('refreshFailed'), 'a genuinely stale list still gets the hint')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('the menu toast drops the refresh-failure suffix once the row is gone', async () => {
+  const calls = []
+  const { item, cleanup } = await renderMenuItem({ rpc: menuRpc(calls), refreshAfterDelete: async () => true })
+  await withLayout(async () => {
+    try {
+      await act(async () => { item().click(); await settle() })
+      await act(async () => { dialogButton(confirmOverlay(), 'confirm').click(); await settle() })
+      const text = toasts().map((node) => node.textContent).join(' | ')
+      assert.ok(text.includes('deleteOk'), 'the delete is reported')
+      assert.ok(!text.includes('refreshFailed'), 'and carries no stale-list advice')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('the menu toast keeps the refresh-failure suffix when the row stayed', async () => {
+  const calls = []
+  const { item, cleanup } = await renderMenuItem({ rpc: menuRpc(calls), refreshAfterDelete: async () => false })
+  await withLayout(async () => {
+    try {
+      await act(async () => { item().click(); await settle() })
+      await act(async () => { dialogButton(confirmOverlay(), 'confirm').click(); await settle() })
+      const text = toasts().map((node) => node.textContent).join(' | ')
+      assert.ok(text.includes('refreshFailed'), 'the stale-list advice survives for a row that is still listed')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('the confirm dialog is a modal dialog whose Tab cycle stays inside', async () => {
+  const rpc = (endpoint) => {
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
+    if (endpoint === 'ping') return Promise.resolve({ version: '0.3.8', menuDeleteAvailable: true })
+    return new Promise(() => {})
+  }
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(rpc)
+    try {
+      const remove = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'delete')
+      await act(async () => { remove.click(); await settle() })
+      const overlay = confirmOverlay()
+      assert.ok(overlay, 'the dialog opened')
+      assert.equal(overlay.getAttribute('role'), 'dialog')
+      assert.equal(overlay.getAttribute('aria-modal'), 'true')
+      const labelledBy = overlay.getAttribute('aria-labelledby')
+      assert.ok(labelledBy !== null && document.getElementById(labelledBy) !== null, 'the dialog is labelled by its title node')
+
+      const cancelButton = dialogButton(overlay, 'cancel')
+      const confirmButton = dialogButton(overlay, 'confirm')
+      assert.equal(document.activeElement, cancelButton, 'cancel keeps the default focus')
+      // aria-modal="true" promises the page behind is inert: Tab must cycle the
+      // two buttons instead of walking into the app.
+      await act(async () => { document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true })) })
+      assert.equal(document.activeElement, confirmButton, 'Tab moves to Delete')
+      await act(async () => { document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true })) })
+      assert.equal(document.activeElement, cancelButton, 'Tab wraps back to Cancel')
+      await act(async () => { document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true })) })
+      assert.equal(document.activeElement, confirmButton, 'Shift+Tab wraps the other way')
+      await act(async () => { document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+      assert.equal(document.activeElement === null || confirmOverlay() === null, true, 'Escape still closes the dialog')
+      assert.equal(confirmOverlay(), null, 'the dialog is gone')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('the zh and en dictionaries carry exactly the same keys', () => {
+  const dictionaries = dict()
+  assert.ok(dictionaries !== null && dictionaries !== undefined, 'apply() must register the locale dictionaries')
+  assert.deepEqual(Object.keys(dictionaries.zh).sort(), Object.keys(dictionaries.en).sort(), 'a key added to one language must be added to both')
+  for (const language of ['zh', 'en']) {
+    for (const [key, value] of Object.entries(dictionaries[language])) {
+      assert.ok(String(value).trim() !== '', `${language}.${key} must not be empty`)
+    }
+  }
 })
