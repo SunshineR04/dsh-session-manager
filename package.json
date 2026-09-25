@@ -1,13 +1,13 @@
 {
   "name": "dsh-session-manager",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "DSH plugin: manage archived sessions — list, restore, permanently delete, a first-class Settings page and a red delete button in the session context menu.",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
   "scripts": {
     "check": "node --check lib/index.js && node --check lib/client.js",
-    "test": "pnpm run check && node --test test/host.test.mjs test/client.render.test.mjs"
+    "test": "pnpm run check && node --test test/host.test.mjs test/client.render.test.mjs test/contract.test.mjs"
   },
   "exports": {
     ".": "./lib/index.js",

@@ -1,0 +1,34 @@
+# The test suite has always been run by hand: `pnpm test` is the *check* (node
+# --check on both libs) plus the host and client suites. E2E stays manual — it
+# needs a desktop dsh install, a seeded isolated home and a real Chrome.
+#
+# The test file list in package.json is explicit on purpose (AGENTS.md records
+# that `node --test test/` is resolved as a module path on Windows), so a new
+# suite is invisible to this workflow until it is added there.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is not decoration: this plugin's field bugs were found there,
+        # the host tests use Windows paths, and the desktop app is the target.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
