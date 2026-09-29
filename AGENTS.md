@@ -27,6 +27,9 @@ pnpm test   # node --check on both libs + host + client render + contract tests
   under test, and its service fakes expose the OFFICIAL surface only (`list` +
   `refresh()`) behind a Proxy that throws on any other name — a method the real
   service does not carry must fail there, never silently skip in production.
+  Its `ctx.effect` stub captures cleanups **by label** (`runDisposer(label)`),
+  which is what makes the teardown paths testable at all: the previous
+  `effect: (fn) => fn()` dropped every disposer.
 - **`test/contract.test.mjs`** pins the client's endpoint literals against
   `RPC_ENDPOINTS` (plus `HOST_ONLY_ENDPOINTS` for routes with no browser caller)
   and the shared `/api` + `${NS}` → host-prefix composition. Its installed-module
@@ -63,7 +66,14 @@ pnpm test   # node --check on both libs + host + client render + contract tests
 - E2E (`scripts/e2e-*.mjs`) drives a real web instance through puppeteer-core
   with Chrome hard-coded at `C:/Program Files/Google/Chrome/Application/chrome.exe`.
   It must run against an isolated home seeded by `scripts/e2e-seed.mjs`, never
-  against the real `~/.dsh`. ⚠ **The desktop `dsh.cmd` shim hardcodes
+  against the real `~/.dsh`. The two **destructive** scripts
+  (`e2e-mutations.mjs`, `e2e-residue.mjs`) enforce that instead of trusting the
+  operator: they require the seeded home (positional for mutations, `--home
+  <path>` for residue) and refuse without the `.session-manager-e2e` marker the
+  seed writes — including an explicit refusal for the real home, because a URL
+  alone cannot prove which home an instance serves (`scripts/e2e-guard.mjs`).
+  Keep that guard on any new destructive script.
+  ⚠ **The desktop `dsh.cmd` shim hardcodes
   `set "DSH_HOME=<real home>"`**, so `DSH_HOME=<e2e-home> dsh ...` does NOT
   isolate — verified: `dsh plugin add` under that env created the profile in
   the real home (delete such a profile if it happens; nothing else is touched).
@@ -216,6 +226,18 @@ plugin row; `dsh plugin add` applies it):
   `collectSummaries` fallback) unwrap `.header`, skip — and warn once about — an
   entry without one, and `test/contract.test.mjs` pins the wrapper against the
   installed backend with three inline fixtures.
+- **One corpus read per operation** (`artifactIndex`): `sessionPersistence.list()`
+  walks every generation and reads+decompresses every stored header, so resolving
+  ONE queued id at a time made `deferred/list` `O(queued × corpus)` — twice over
+  (the sweep and the `recoverable` split), while holding the operation lock.
+  `deleteLocked`, `finishDeferredDeletion`, `sweepPending` and the
+  `deferred/list` handler build the index ONCE and pass it down
+  (`resolveSessionDirs(id, header, index)`, `hasArtifact(id, index)`); omitting
+  it keeps the single-id behavior. The index also accepts SYMLINKED project
+  directories: a dirent for a link reports `isDirectory() === false` (true for
+  Windows junctions too) while the leaf check uses `stat`, so filtering on
+  `isDirectory()` alone could hide an artifact, clear its tombstone and
+  resurrect the session at the next boot.
 - **`api-session/removed` must be emitted after a real delete**: the host only
   emits it itself when a *live* session is disposed, so a cold delete would
   otherwise linger in every connected client's list store forever (the client
@@ -276,11 +298,17 @@ plugin row; `dsh plugin add` applies it):
      pending-seed timer in the teardown disposer.
   Regression cover: `test/host.test.mjs` ("deferred/list can re-announce…",
   "the persistence header listing alone…", "the persistence header listing is a
-  real fallback…"), `test/client.render.test.mjs` ("a removal event for a queued
-  id…", "a removal event that outruns its own delete response…", "a failed first
-  queue read does not disarm the residue repair", "a bulk run made only of open
-  deletes…", "a mixed bulk run does not re-pull…", "an explicit list pull
-  re-checks the residue even when the store cannot be watched") and
+  real fallback…", "a symlinked project directory…", "deferred/list reads the
+  persistence listing once…"), `test/client.render.test.mjs` ("a removal event
+  for a queued id…", "a removal event that outruns its own delete response…",
+  "a failed first queue read does not disarm the residue repair", "a bulk run
+  made only of open deletes…", "a mixed bulk run does not re-pull…", "an
+  explicit list pull re-checks the residue even when the store cannot be
+  watched", "teardown closes an open dialog…", "a dialog that cannot be
+  attached resolves as cancelled…", "a failed pending-queue read is reported…",
+  "host warnings and a failed refresh both reach the user", "the unreachable-host
+  guidance appears when the ping fails", "the dialog describes itself…", "two
+  pending-cancel buttons are distinguishable by name") and
   `scripts/e2e-residue.mjs` (real Chrome: after a menu delete of an open session
   the id renders in NEITHER view).
 - **Open (live-idle) sessions delete immediately, via a tombstone**: dsh has no
@@ -386,6 +414,22 @@ plugin row; `dsh plugin add` applies it):
   `RiskConfirmation`'s 72px/136px min-widths. `test/client.render.test.mjs`
   pins the tokens, and `scripts/e2e-dialog-style.mjs` compares the rendered
   styles against the live official dialog (all 8 checks must pass).
+  Three lifecycle/feedback rules ride with it: (a) the overlay is attached
+  inside a try/catch that resolves through the SAME "cancelled" channel as the
+  degenerate-render check — a throw there used to leave `confirmOpen` set (every
+  later confirm then resolved null, i.e. a silently dead delete button) and to
+  reject a promise both settings call sites await outside try/catch; (b)
+  `closeOpenConfirm` is released by `apply`'s injected-DOM teardown, so a
+  reload with a dialog open cannot orphan the overlay, its capture keydown
+  listener, or the guard; (c) `aria-describedby` names the consequence text,
+  because on an irreversible delete the title alone is not the information the
+  user needs. The section's feedback regions follow the same rule: the
+  `role="status"` live region is mounted BEFORE its first child (a region
+  created with its content is the classic missed announcement), failures land in
+  a `role="alert"` banner, and `pushError` accumulates — last-write-wins
+  silently dropped a partial delete's host warnings whenever its refresh also
+  failed, and a swallowed `deferred/list` failure left a queued session
+  rendered as an ordinary archived row with no feedback at all.
 - Session ids are addressed only by exact **full session id** (index-based
   addressing was rejected with the old slash commands — indexes drift). The
   settings page filters out `origin === 'subagent'` rows.

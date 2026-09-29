@@ -4,12 +4,29 @@
 // 视图选项 → 全部对话（显示已归档）, where the archive tombstone is visible by
 // design. Any queued husk id passed on the command line must be gone as well.
 //
-// Run: node scripts/e2e-residue.mjs <url> [<queued-husk-id>...]
+// Run: node scripts/e2e-residue.mjs <url> --home <e2e-home> [<queued-husk-id>...]
+//
+// `--home` is REQUIRED: this script permanently deletes a session through the
+// instance behind <url>, and a URL alone cannot prove which home that instance
+// serves. The home must carry the marker scripts/e2e-seed.mjs writes — see
+// scripts/e2e-guard.mjs.
 import puppeteer from 'puppeteer-core'
 
-const url = process.argv[2]
-const huskIds = process.argv.slice(3)
+import { assertDisposableHome } from './e2e-guard.mjs'
+
+const argv = process.argv.slice(2)
+const homeIndex = argv.indexOf('--home')
+const e2eHome = homeIndex === -1 ? undefined : argv[homeIndex + 1]
+const positional = homeIndex === -1 ? argv : argv.filter((_, index) => index !== homeIndex && index !== homeIndex + 1)
+const url = positional[0]
+const huskIds = positional.slice(1)
 if (!url) process.exit(2)
+try {
+  assertDisposableHome(e2eHome, { script: 'e2e-residue' })
+} catch (error) {
+  console.error(error.message)
+  process.exit(2)
+}
 
 const browser = await puppeteer.launch({
   executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',

@@ -9,12 +9,23 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import puppeteer from 'puppeteer-core'
 
+import { assertDisposableHome } from './e2e-guard.mjs'
+
 const url = process.argv[2]
 const e2eHome = process.argv[3]
 const outArgIndex = process.argv.indexOf('--out')
 const outDir = outArgIndex === -1 ? 'e2e-artifacts' : process.argv[outArgIndex + 1]
 if (!url || !e2eHome) {
   console.error('usage: node scripts/e2e-mutations.mjs <url> <e2e-home-win-path> [--out <dir>]')
+  process.exit(2)
+}
+// This script permanently deletes real sessions through the instance behind
+// <url>, so the home must be one scripts/e2e-seed.mjs created — never the
+// user's own (a URL alone cannot prove which home the instance serves).
+try {
+  assertDisposableHome(e2eHome, { script: 'e2e-mutations' })
+} catch (error) {
+  console.error(error.message)
   process.exit(2)
 }
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe'

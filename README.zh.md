@@ -183,7 +183,10 @@ dsh --profile <test-profile> --dump-config    # 检查 bundle 组装
 dsh --profile <test-profile> --help           # 完整启动（headless 模板）
 ```
 
-浏览器端到端验证（隔离 DSH_HOME，不碰真实数据；需要本机 Chrome 与 puppeteer-core）：
+### 浏览器端到端验证（可选）
+
+启动一个一次性 dsh web 实例，跑在**隔离的 `DSH_HOME`** 上（绝不碰真实数据），用
+puppeteer-core + 本机 Chrome 驱动界面：
 
 ```bash
 cp scripts/e2e-seed.local.example.json scripts/e2e-seed.local.json
@@ -199,7 +202,12 @@ node scripts/e2e-seed.mjs <e2e-home> ~/.dsh          # 1. 播种隔离测试 HOM
 #        "<app.asar>/lib/desktop-cli.js" --profile sm-test --port 43123 --no-open
 node scripts/e2e-check.mjs <打印出的带 token 的 URL>  # 3. 只读检查：三点菜单/设置页
 node scripts/e2e-mutations.mjs <URL> <e2e-home>       # 4. 闭环：恢复→归档→彻底删除
+node scripts/e2e-residue.mjs <URL> --home <e2e-home>  # 5. 残留验收：两个视图都不该有该行
 ```
+
+⚠ 第 4、5 步会**真的删除会话**：`--home`（或第二个参数）现在必须有值，且该 home
+必须带 `scripts/e2e-seed.mjs` 写下的标记文件——缺少标记（或指向真实 `~/.dsh`）时脚本
+直接拒绝运行，因为只凭一个 URL 无法证明它背后是哪个 home（见 `scripts/e2e-guard.mjs`）。
 
 ## 参考项目
 

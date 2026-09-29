@@ -235,7 +235,14 @@ node scripts/e2e-seed.mjs <e2e-home> ~/.dsh         # 1. seed the isolated test 
 #        "<app.asar>/lib/desktop-cli.js" --profile sm-test --port 43123 --no-open
 node scripts/e2e-check.mjs <printed token URL>      # 3. read-only checks: menu item / settings page
 node scripts/e2e-mutations.mjs <URL> <e2e-home>     # 4. closed loop: restore → archive → delete
+node scripts/e2e-residue.mjs <URL> --home <e2e-home>  # 5. residue acceptance: neither view shows the row
 ```
+
+⚠ Steps 4 and 5 **really delete sessions**: the `--home` argument (or step 4's
+second positional) is now required, and the home must carry the marker
+`scripts/e2e-seed.mjs` writes. Without it — or when it names the real `~/.dsh` —
+the script refuses to run, because a URL alone cannot prove which home the
+instance behind it serves (see `scripts/e2e-guard.mjs`).
 
 ## References
 

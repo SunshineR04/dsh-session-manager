@@ -49,6 +49,11 @@ const act = React.act ?? ((fn) => fn())
 function makeCtx(registry = services) {
   const components = new Map()
   const specs = new Map()
+  // Cleanups are captured BY LABEL so a test can run exactly one of them.
+  // `effect` used to just call fn() and drop the disposer, which made every
+  // teardown path (dialog close, injected DOM removal, subscription release)
+  // structurally untestable.
+  const disposers = new Map()
   let dict = null
   const ctx = {
     // The locale dictionaries are captured here (production registers the same
@@ -59,7 +64,11 @@ function makeCtx(registry = services) {
     // service does not carry fails loudly instead of silently skipping.
     // A second ctx can be given its own registry (see the retry/debounce tests).
     get: (name) => registry[name],
-    effect: (fn) => fn(),
+    effect: (fn, label) => {
+      const dispose = fn()
+      if (typeof dispose === 'function') disposers.set(label ?? `effect-${disposers.size}`, dispose)
+      return dispose
+    },
     logger: {},
     slots: {
       inject(_name, generator) {
@@ -85,11 +94,16 @@ function makeCtx(registry = services) {
     menuItem: () => components.get('sidebar.workspaces.session.menu.item'),
     menuSpec: () => specs.get('sidebar.workspaces.session.menu.item'),
     dict: () => dict,
+    /** Run the cleanup registered under `label` (no-op when there is none). */
+    runDisposer: (label) => {
+      const dispose = disposers.get(label)
+      if (typeof dispose === 'function') dispose()
+    },
   }
 }
 
 const services = { sessions: undefined, workspaces: undefined, connection: undefined, remote: undefined }
-const { ctx, section, sectionSpec, menuItem, menuSpec, dict } = makeCtx()
+const { ctx, section, sectionSpec, menuItem, menuSpec, dict, runDisposer } = makeCtx()
 mod.apply(ctx)
 
 // ── service fakes: the OFFICIAL surface only ────────────────────────────────
@@ -1294,4 +1308,182 @@ test('an explicit list pull re-checks the residue even when the store cannot be 
   t.mock.timers.tick(3000)
   await flush()
   assert.equal(queueReads, 2, 'one repair per residue episode — a repeated pull never starts a poll loop')
+})
+
+// ── P2: dialog lifecycle, feedback channels, a11y ───────────────────────────
+//
+// These are the shapes the earlier rounds could not see: a dialog that outlives
+// its plugin, a failure that never reaches the user, two messages collapsing
+// into one, and accessible names that do not identify their row.
+
+const rowDeleteButton = (container, index = 0) =>
+  [...container.querySelectorAll('button')].filter((b) => (b.textContent || '').trim() === 'delete')[index]
+const escapeDialog = async () => {
+  await act(async () => {
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await settle()
+  })
+}
+
+test('teardown closes an open dialog instead of wedging the one-at-a-time guard', async () => {
+  const { sess, ws } = bulkFixture()
+  const calls = []
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(idleRpc(calls), sess, ws)
+    try {
+      await act(async () => { rowDeleteButton(container).click(); await settle() })
+      assert.ok(confirmOverlay(), 'the dialog is open')
+
+      // Plugin teardown (unload / re-apply) must take the overlay AND release
+      // `confirmOpen`: leaving it set makes every later confirm resolve null, so
+      // the delete button would open nothing and delete nothing, silently.
+      await act(async () => { runDisposer('session-manager: injected DOM teardown') })
+      assert.equal(confirmOverlay(), null, 'teardown removed the open dialog')
+      assert.ok(!container.textContent.includes('errorPrefix'), 'and reported no error')
+
+      await act(async () => { rowDeleteButton(container).click(); await settle() })
+      assert.ok(confirmOverlay(), 'the guard was released, so a later confirm still opens')
+      await escapeDialog()
+      assert.equal(confirmOverlay(), null)
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('a dialog that cannot be attached resolves as cancelled and frees the guard', async () => {
+  const { sess, ws } = bulkFixture()
+  const calls = []
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(idleRpc(calls), sess, ws)
+    const originalAppend = document.body.appendChild
+    try {
+      // The host DOM refuses the overlay. Before the fix this rejected the
+      // promise (unhandled — both settings call sites await it outside any try)
+      // AND left `confirmOpen` set forever.
+      document.body.appendChild = () => { throw new Error('appendChild refused') }
+      await act(async () => { rowDeleteButton(container).click(); await settle() })
+      assert.equal(confirmOverlay(), null, 'no overlay is left behind')
+      assert.ok(container.textContent.includes('confirmRenderFailed'), 'the failure reaches the user, localized')
+      assert.ok(!calls.some(([endpoint]) => endpoint === 'delete'), 'and nothing was deleted')
+
+      document.body.appendChild = originalAppend
+      await act(async () => { rowDeleteButton(container).click(); await settle() })
+      assert.ok(confirmOverlay(), 'the next confirm opens normally')
+      await escapeDialog()
+    } finally {
+      document.body.appendChild = originalAppend
+      await cleanup()
+    }
+  })
+})
+
+test('a failed pending-queue read is reported instead of silently emptying the banner', async () => {
+  const rpc = (endpoint) => {
+    if (endpoint === 'deferred/list') {
+      return Promise.reject(Object.assign(new Error('queue read failed'), { code: 'session-manager/internal' }))
+    }
+    if (endpoint === 'ping') return Promise.resolve({ version: 'test', menuDeleteAvailable: true })
+    return new Promise(() => {})
+  }
+  const { container, cleanup } = await renderSection(rpc)
+  try {
+    // With the read swallowed, `pendingIds` stays empty: a queued session shows
+    // up as an ordinary archived row (whose Restore the host refuses) and the
+    // banner disappears — with no feedback at all.
+    const alert = container.querySelector('[role="alert"]')
+    assert.ok(alert, 'the failure is surfaced in the alert region')
+    assert.ok(alert.textContent.includes('queue read failed'), `the cause is named: ${alert.textContent}`)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('host warnings and a failed refresh both reach the user', async () => {
+  const { sess, ws } = bulkFixture()
+  const rpc = (endpoint, payload) => {
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
+    if (endpoint === 'ping') return Promise.resolve({ version: 'test', menuDeleteAvailable: true })
+    if (endpoint === 'delete') return Promise.resolve({ sessionId: payload.sessionId, deleted: true, warnings: ['artifact not found'] })
+    return new Promise(() => {})
+  }
+  await withLayout(async () => {
+    // A partial delete (bookkeeping done, a file seam degraded) whose list
+    // refresh also fails: two distinct messages stand, one operation.
+    const { container, cleanup } = await renderSection(rpc, sess, ws, { refreshAfterDelete: async () => false })
+    try {
+      await act(async () => { rowDeleteButton(container).click(); await settle() })
+      await act(async () => { dialogButton(confirmOverlay(), 'confirm').click(); await settle() })
+      const alert = container.querySelector('[role="alert"]')
+      assert.ok(alert, 'the alert region carries the outcome')
+      assert.ok(alert.textContent.includes('artifact not found'), `the host warning survives: ${alert.textContent}`)
+      assert.ok(alert.textContent.includes('refreshFailed'), 'and so does the refresh failure')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('the unreachable-host guidance appears when the ping fails', async () => {
+  const rpc = (endpoint) => {
+    if (endpoint === 'ping') return Promise.reject(new Error('host down'))
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
+    return new Promise(() => {})
+  }
+  const { container, cleanup } = await renderSection(rpc)
+  try {
+    // `!rpcAvailable` could never be true (the inject face always supplies the
+    // closure), so this guidance — and the "reload the page" advice in it — was
+    // unreachable; the real case showed a raw English error instead.
+    assert.ok(container.textContent.includes('rpcUnreachable'), 'the header reports the unreachable host')
+    assert.ok(container.textContent.includes('unavailable'), 'and the reload guidance is shown')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('the dialog describes itself, and the live regions are wired for announcements', async () => {
+  const { sess, ws } = bulkFixture()
+  const calls = []
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(idleRpc(calls), sess, ws)
+    try {
+      // Mounted BEFORE its first child: a live region created in the same commit
+      // as its content is the classic missed announcement.
+      assert.ok(container.querySelector('[role="status"][aria-live="polite"]'), 'the status region is always mounted')
+      assert.equal(container.querySelector('[role="alert"]'), null, 'and no alert is shown yet')
+
+      await act(async () => { rowDeleteButton(container).click(); await settle() })
+      const overlay = confirmOverlay()
+      const describedBy = overlay.getAttribute('aria-describedby')
+      assert.ok(describedBy, 'the dialog is described by an id')
+      const body = document.getElementById(describedBy)
+      assert.ok(body, 'and that id resolves inside the dialog')
+      assert.equal(body.textContent, 'deleteConfirmBody', 'to the consequence text, not the title alone')
+      assert.notEqual(describedBy, overlay.getAttribute('aria-labelledby'), 'the two ids are distinct')
+      await escapeDialog()
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('two pending-cancel buttons are distinguishable by name', async () => {
+  const rpc = (endpoint) => {
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [ID2, ID3], recoverable: [ID2, ID3] })
+    if (endpoint === 'ping') return Promise.resolve({ version: 'test', menuDeleteAvailable: true })
+    return new Promise(() => {})
+  }
+  const { container, cleanup } = await renderSection(rpc)
+  try {
+    const cancels = [...container.querySelectorAll('button')]
+      .filter((b) => (b.textContent || '').trim() === 'pendingCancel')
+    assert.equal(cancels.length, 2, 'both recoverable entries render a cancel button')
+    const names = cancels.map((b) => b.getAttribute('aria-label'))
+    // The id used to sit in an unassociated sibling <code>, so a screen reader
+    // exposed two identical "cancel deletion" buttons.
+    assert.deepEqual(names, [`pendingCancel ${ID2}`, `pendingCancel ${ID3}`])
+  } finally {
+    await cleanup()
+  }
 })

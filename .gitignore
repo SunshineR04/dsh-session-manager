@@ -6,3 +6,4 @@ e2e-artifacts/
 *.tgz
 scripts/e2e-seed.local.json
 .zcode/
+.zcodeignore

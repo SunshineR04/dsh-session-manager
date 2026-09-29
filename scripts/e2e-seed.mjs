@@ -12,6 +12,8 @@ import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { E2E_MARKER } from './e2e-guard.mjs'
+
 const e2eHome = process.argv[2]
 const sourceHome = process.argv[3] ?? join(homedir(), '.dsh')
 if (!e2eHome) {
@@ -82,4 +84,11 @@ const registry = {
   },
 }
 await writeFile(join(e2eHome, 'storages', 'workspace.json'), JSON.stringify(registry, null, 2))
+// Marker for the DESTRUCTIVE e2e scripts: they refuse to run against a home
+// this seed did not create (see scripts/e2e-guard.mjs) — otherwise pointing
+// one at the user's own instance deletes their sessions.
+await writeFile(
+  join(e2eHome, E2E_MARKER),
+  JSON.stringify({ plugin: 'dsh-session-manager', seededAt: new Date().toISOString(), seededFrom: sourceHome }, null, 2),
+)
 console.log(`e2e home seeded: ${e2eHome}`)

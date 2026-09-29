@@ -3,7 +3,7 @@
 // against real temporary directories.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readdir } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readdir, symlink } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -413,6 +413,68 @@ test('the persistence header listing is a real fallback when the controller is a
   assert.equal(listed.items[0].sessionId, SESSION_ID)
   assert.equal(listed.items[0].cwd, CWD)
   assert.equal(listed.items[0].updatedAt, 1690000000000)
+})
+
+test('a symlinked project directory is scanned for the artifact', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers, registry } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  // The artifact is reachable only through a LINK under the sessions root, and
+  // both header seams are down: the raw scan is the only seam left. A dirent
+  // for a link reports `isDirectory() === false` (verified on Windows junctions
+  // too), so filtering on `isDirectory()` alone skipped the project and the
+  // tombstone was cleared while the artifact survived — the deleted session
+  // would be listed again on the next boot.
+  const realProject = join(fixture.root, 'real-project')
+  const realSession = join(realProject, SESSION_ID)
+  await mkdir(realSession, { recursive: true })
+  await writeFile(join(realSession, 'session.jsonl.zstd'), 'bytes')
+  await mkdir(fixture.sessionsRoot, { recursive: true })
+  await symlink(realProject, join(fixture.sessionsRoot, '--linked--'), 'junction')
+  registry.readSessionHeader = async () => {
+    throw new Error('header seam down')
+  }
+  ctx.services.sessionPersistence.list = async () => {
+    throw new Error('listing seam down')
+  }
+  const manager = createSessionManager(ctx, {})
+
+  const result = await manager.deleteSession(SESSION_ID)
+  assert.equal(result.deleted, true)
+  assert.equal(result.warnings, undefined, 'the raw scan must follow the project link')
+  assert.equal(existsSync(realSession), false, 'and dispose what it found there')
+})
+
+test('deferred/list reads the persistence listing once for the whole queue', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers, services } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  headers.set(OTHER_ID, { id: OTHER_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  await writeSessionFiles(fixture, OTHER_ID)
+  // The real `list()` walks every generation and reads+decompresses every
+  // stored header, so resolving ONE queued id at a time made this endpoint
+  // O(queued × corpus) — for the sweep AND for the `recoverable` split.
+  let listings = 0
+  const originalList = services.sessionPersistence.list
+  services.sessionPersistence.list = async () => {
+    listings += 1
+    return originalList()
+  }
+  // Both ids are LIVE, so the sweep keeps them queued and `hasArtifact` runs
+  // for each — the shape that used to re-read the corpus per id.
+  ctx.services.sessions = { get: (id) => (id === SESSION_ID || id === OTHER_ID ? {} : undefined) }
+  const manager = createSessionManager(ctx, {})
+  await manager.addPending(SESSION_ID)
+  await manager.addPending(OTHER_ID)
+  const handler = rpcHandlerFor(manager)
+
+  listings = 0
+  const listed = await handler('deferred/list', {})
+  assert.equal(listed.ok, true)
+  assert.deepEqual(listed.value.sessionIds.slice().sort(), [SESSION_ID, OTHER_ID].slice().sort())
+  assert.deepEqual(listed.value.recoverable.slice().sort(), [SESSION_ID, OTHER_ID].slice().sort())
+  assert.equal(listings, 1, 'one corpus read for the whole request, not one per queued id')
 })
 
 test('deleteSession broadcasts api-session/removed for cold and open deletions', async () => {
