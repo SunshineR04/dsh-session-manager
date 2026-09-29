@@ -206,14 +206,51 @@ plugin row; `dsh plugin add` applies it):
   `dsh-api-session-controller/lib/client.js`). The sidebar's 未分组/ungrouped
   bucket is "every session in the client list store not accounted by any
   workspace and not archived" — any stale summary there *is* a resurrection.
+- **An open-session delete leaves a residue — three rules, all load-bearing**
+  (evidence in `docs/analysis-deleted-open-session-still-listed.md` §8):
+  1. **The client must never pull the list for a queued id.**
+     `pendingDeleteIds` is fed by the `rpc` wrapper (`deferred/list` union;
+     `delete` with `openAtDelete === true` adds; `deferred/cancel` removes) and
+     NOT by the components: the settings section and the menu item are
+     module-scope and cannot see `apply`'s closure, so a helper called from
+     there throws (`rememberPendingDelete is not defined` — caught by the
+     component and reported as a per-row failure). `scheduleRemovedRefresh`
+     checks the set **when scheduling AND when firing**: the delete RESPONSE and
+     the event travel on different channels and the event usually arrives first,
+     so a schedule-time-only guard still pulls the husk back (e2e-proven).
+  2. **The tombstone hides the residue in the DEFAULT view only.** 视图选项 →
+     全部对话（显示已归档）/仅显示已归档 renders archived strays inside the
+     ungrouped bucket — that is the reported "deleted session came back".
+     `reannouncePendingRemovals` (config, **default `true`** since 0.4.1 — read
+     as `!== false`, like `menuDeleteAvailable`, so a raw composition config
+     still gets the default) is the repair hook:
+     on every `deferred/list` the host re-announces `api-session/removed` for
+     queued ids whose session is still LIVE. The client triggers it through
+     `evaluateResidue`/`scheduleRepair` one repair per residue episode (never a
+     poll loop) — keep that invariant.
+  3. **Do NOT "fix" this by detaching the live session**
+     (`sessions.liveEntryFor(...).detach()`): the agent stays registered for the
+     process lifetime (the controller discards the only `dispose()` handle),
+     `sessions.flush()` then throws for that id (goal driver, checkpoint policy,
+     message-feedback, subagent continuation and agent-team are all mounted),
+     `waitForDrainingConfiguredIdentity` waits on agents AND sessions so a
+     config-driven same-id start stalls, and `session/disposed` listeners write
+     artifacts back (projection-cache checkpoint; JSONL final drain through a
+     `mkdir`-ing path). Full list in the analysis doc §8.1.
+  Regression cover: `test/host.test.mjs` ("deferred/list can re-announce…"),
+  `test/client.render.test.mjs` ("a removal event for a queued id…", "a removal
+  event that outruns its own delete response…", "a bulk run made only of open
+  deletes…") and `scripts/e2e-residue.mjs` (real Chrome: after a menu delete of
+  an open session the id renders in NEITHER view).
 - **Open (live-idle) sessions delete immediately, via a tombstone**: dsh has no
   public "close session" API — the in-memory summary outlives the delete (its
   owner scope is the session-controller service scope, not the UI view), but
   appends open the log by path and never recreate a deleted directory, so
   files can go right away. `deleteSession` runs the read-only existence check,
   then queues the id BEFORE any mutation (crash safety), detaches it, keeps it
-  in the archive set as a **tombstone** (the
-  official archive filter hides the lingering summary everywhere), disposes
+  in the archive set as a **tombstone** (the official archive filter hides the
+  lingering summary in the DEFAULT view — a sidebar set to show archived rows
+  renders it; see the residue rules above), disposes
   files + projcache, emits `api-session/removed`, and reports
   `openAtDelete: true`. The next-boot sweep calls `finishDeferredDeletion`,
   which must clear the tombstone even when `sessionKnown` is false (files
@@ -277,6 +314,17 @@ plugin row; `dsh plugin add` applies it):
   `aria-labelledby` id (a fixed id would resolve to whichever overlay came
   first), and hands focus back to the element that opened it on close — the menu
   path's opener is unmounted by then, hence the `document.contains` check.
+  ⚠ **The card must use the OPAQUE modal tokens, never the menu surface.**
+  `--dsw-specific-menu` resolves to a ~94%-alpha popover fill (field report:
+  the dialog read as see-through over the page). Mirror the official modal
+  instead (`dsh-client-ui-primitives Modal.module.css` / `Button.module.css`):
+  card = `--dsw-alias-bg-layer-2` + `--dsw-radius-panel` (28px) +
+  `--dsw-elevation-prominent`; mask = `--dsw-alias-bg-mask-1` +
+  `--dsw-mask-blur` over `max(24px, var(--dsh-frame-overlay-top, 24px)) 24px`;
+  actions = the `Button md` spec (36px tall, `--dsw-radius-md`, 14/22) with
+  `RiskConfirmation`'s 72px/136px min-widths. `test/client.render.test.mjs`
+  pins the tokens, and `scripts/e2e-dialog-style.mjs` compares the rendered
+  styles against the live official dialog (all 8 checks must pass).
 - Session ids are addressed only by exact **full session id** (index-based
   addressing was rejected with the old slash commands — indexes drift). The
   settings page filters out `origin === 'subagent'` rows.

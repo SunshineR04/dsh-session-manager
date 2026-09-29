@@ -137,12 +137,30 @@ attachments are content-addressed and intentionally kept.
   files and metadata are removed at once (post-delete flushes cannot recreate
   anything — appends open the log by path and never recreate a deleted
   directory). Because dsh has no public "close session" API, the in-memory
-  copy lingers (and still shows in that open view) until the owning UI scope
-  dies; the id is kept in the archive set as a **tombstone**, so it is hidden
-  from the workspace browser and every listing meanwhile, and the next dsh
-  restart finishes the cleanup. Sessions with a running task are refused unless
-  `allowDeleteRunning` is on, and that switch skips only the refusal — a forced
-  delete is still tombstoned and queued like any other open-session delete.
+  copy lingers until its process ends; the id is kept in the archive set as a
+  **tombstone** and the next dsh restart finishes the cleanup. Sessions with a
+  running task are refused unless `allowDeleteRunning` is on, and that switch
+  skips only the refusal — a forced delete is still tombstoned and queued like
+  any other open-session delete.
+  - **At delete time** the client never pulls that id back: a successful open
+    delete marks it in this client's pending set, and the debounced list pull
+    that follows `api-session/removed` skips queued ids — checked both when the
+    pull is scheduled and when it fires, because the delete RESPONSE and the
+    event travel on different channels (the event usually wins). The row
+    therefore stays gone in **every** sidebar view right after the delete,
+    including 视图选项 → 全部对话（显示已归档）.
+  - **The one residual shape**: a page reload (or another client) re-learns the
+    id from the host's own session list, which still reports the in-memory copy.
+    It is archived, so the default view keeps hiding it; only a sidebar set to
+    show archived rows renders it in the ungrouped bucket until dsh restarts.
+  - **Repair hook (on by default since 0.4.1)**: every read of the
+    pending-delete queue makes the host re-announce the official
+    `api-session/removed` for each queued id that is **still live**, so every
+    connected client drops it again and the archived-rows view stays clean too.
+    The client debounces one repair per residue episode (never a poll loop); the
+    cost is a possible one-frame flicker after a list pull. Set
+    `reannouncePendingRemovals: false` to go back to the tombstone-only
+    behavior, where a reload re-shows the row while archived rows are displayed.
 - **Pending banner**: the settings page lists only the sessions you can
   still act on. Entries with files on disk (e.g. a mid-delete crash leftover)
   get a row with **Cancel deletion**, which clears the tombstone as well
@@ -166,6 +184,7 @@ attachments are content-addressed and intentionally kept.
 | `allowDeleteRunning` | `false` | Force-delete sessions with a **running** task (skips only the refusal — a forced delete is still tombstoned and queued; dangerous) |
 | `toolDeleteRequiresConfirm` | `true` | Agent delete tool requires `confirm: true` |
 | `menuDeleteAvailable` | `true` | Mount the red menu item |
+| `reannouncePendingRemovals` | `true` | On every pending-queue read, re-announce `api-session/removed` for queued ids whose session is still live, so even a "show archived" sidebar stops rendering the residue (set `false` for the tombstone-only behavior — see "Delete semantics") |
 
 ## Develop
 

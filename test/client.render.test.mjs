@@ -304,6 +304,47 @@ test('refresh button spins while a refresh is in flight', async () => {
   }
 })
 
+test('confirm dialog card uses the official opaque modal surface, not the translucent menu one', async () => {
+  const calls = []
+  const rpc = (endpoint) => {
+    calls.push([endpoint])
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
+    if (endpoint === 'ping') return Promise.resolve({ version: '0.4.1', menuDeleteAvailable: true })
+    return new Promise(() => {})
+  }
+  const { container, cleanup } = await renderSection(rpc)
+  const originalRect = window.HTMLElement.prototype.getBoundingClientRect
+  window.HTMLElement.prototype.getBoundingClientRect = () => ({ x: 0, y: 0, top: 0, left: 0, width: 1200, height: 800, bottom: 800, right: 1200, toJSON() {} })
+  try {
+    const deleteButton = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'delete')
+    assert.ok(deleteButton, 'row delete button renders')
+    await act(async () => { deleteButton.click(); await new Promise((resolve) => setTimeout(resolve, 0)) })
+    const overlay = document.querySelector('[data-sm-confirm]')
+    assert.ok(overlay, 'the confirm dialog opened')
+    // `--dsw-specific-menu` is a 94%-alpha popover fill; taking it made the
+    // dialog read as see-through. A modal card must use the opaque layer-2
+    // surface with the official panel geometry (Modal.module.css).
+    const card = overlay.firstElementChild
+    assert.ok(card, 'the dialog card renders')
+    assert.ok(card.style.background.includes('--dsw-alias-bg-layer-2'), 'the card sits on the opaque layer-2 surface')
+    assert.ok(!card.style.background.includes('--dsw-specific-menu'), 'the translucent menu surface is gone from the dialog')
+    assert.ok(card.style.borderRadius.includes('--dsw-radius-panel'), 'the card uses the official panel radius')
+    assert.ok(card.style.boxShadow.includes('--dsw-elevation-prominent'), 'the card uses the official prominent elevation')
+    assert.ok(overlay.style.background.includes('--dsw-alias-bg-mask-1'), 'the backdrop uses the official mask token')
+    const confirmButton = [...overlay.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'confirm')
+    assert.equal(confirmButton.style.height, '36px', 'the confirm action uses the official control height (Button md)')
+    assert.ok(confirmButton.style.borderRadius.includes('--dsw-radius-md'), 'and the shared control radius')
+    await act(async () => {
+      document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    assert.equal(document.querySelector('[data-sm-confirm]'), null, 'Escape closes the dialog again')
+  } finally {
+    window.HTMLElement.prototype.getBoundingClientRect = originalRect
+    await cleanup()
+  }
+})
+
 test('confirm dialog: cancel-focused safe defaults, Enter never confirms, Delete click does', async () => {
   const calls = []
   const rpc = (endpoint, payload) => {
@@ -882,27 +923,31 @@ const OK_PING = { ok: true, value: { menuDeleteAvailable: true } }
 test('the menu ping retries twice, so a transient failure cannot hide the row', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const attempts = []
+  const countOf = (endpoint) => attempts.filter((method) => method === `session-manager/${endpoint}`).length
   const flaky = makeCtx({
     sessions: undefined,
     workspaces: undefined,
     remote: undefined,
     connection: { rpc: { call: async (_channel, method) => {
       attempts.push(method)
-      if (attempts.length < 3) throw new Error('transient')
+      if (method === 'session-manager/ping' && countOf('ping') < 3) throw new Error('transient')
       return OK_PING
     } } },
   })
   mod.apply(flaky.ctx)
   await flush()
-  assert.equal(attempts.length, 1, 'the first ping is attempted right away')
+  assert.equal(countOf('ping'), 1, 'the first ping is attempted right away')
   assert.equal(flaky.menuSpec().inject().menuEnabled, null, 'nothing is decided while a retry is pending')
   t.mock.timers.tick(1000)
   await flush()
-  assert.equal(attempts.length, 2, 'the first retry fires after 1s')
+  assert.equal(countOf('ping'), 2, 'the first retry fires after 1s')
   t.mock.timers.tick(3000)
   await flush()
-  assert.equal(attempts.length, 3, 'the second retry fires 3s later')
+  assert.equal(countOf('ping'), 3, 'the second retry fires 3s later')
   assert.equal(flaky.menuSpec().inject().menuEnabled, true, 'the retries settle the value before the entry first renders')
+  // The first successful ping is also the client's reachability handshake: it
+  // reads the pending-delete queue exactly once (the residue watch's seed).
+  assert.equal(countOf('deferred/list'), 1, 'the pending queue is seeded once, on the first successful ping')
 })
 
 test('the menu ping gives up after the retries and keeps the row hidden', async (t) => {
@@ -982,6 +1027,126 @@ test('one dialog at a time, a fresh label id per dialog, and focus back on the o
         document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
         await settle()
       })
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+// ── pending-deletion residue (open-session tombstones) ──────────────────────
+//
+// A permanent delete of an OPEN session cannot close the host's in-memory copy,
+// so the id stays queued and the host keeps listing it. Two client rules keep
+// that residue out of the store: no list pull for a queued id, and exactly one
+// host queue read per residue episode (a configured host answers it with a
+// fresh `api-session/removed`).
+
+test('a removal event for a queued id never pulls the list back', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let handler = null
+  let pulls = 0
+  let queueReads = 0
+  const counting = makeSessionsService(
+    { byId: { [ID]: { displayTitle: 'Hello world', cwd: 'C:\\x', running: false } }, ids: [ID], phase: 'ready' },
+    { onRefresh: () => { pulls += 1 } },
+  )
+  const client = makeCtx({
+    sessions: counting,
+    workspaces: undefined,
+    connection: { rpc: { call: async (_channel, method) => {
+      if (method === 'session-manager/ping') return OK_PING
+      if (method === 'session-manager/deferred/list') {
+        queueReads += 1
+        return { ok: true, value: { sessionIds: [ID], recoverable: [] } }
+      }
+      throw new Error(`unexpected method ${method}`)
+    } } },
+    remote: { $on: (event, callback) => { if (event === 'api-session/removed') handler = callback; return () => {} } },
+  })
+  mod.apply(client.ctx)
+  await flush()
+  assert.equal(typeof handler, 'function', 'the plugin subscribes to api-session/removed')
+  assert.equal(queueReads, 1, 'the first successful ping seeds the pending queue exactly once')
+
+  // The seeded id is an OPEN delete: its removal must NOT pull the list, or the
+  // still-live host copy comes straight back into the store.
+  handler(ID)
+  t.mock.timers.tick(250)
+  await flush()
+  assert.equal(pulls, 0, 'a queued id is never pulled back into the store')
+
+  // Any other removal keeps the original belt-and-braces pull.
+  handler('session-ffffffff-0000-4000-8000-00000000000f')
+  t.mock.timers.tick(250)
+  await flush()
+  assert.equal(pulls, 1, 'a removal for an unqueued id still refreshes the list')
+
+  // The seeded id IS in the store, so the residue watch asks the host once.
+  t.mock.timers.tick(500)
+  await flush()
+  const readsAfterRepair = queueReads
+  assert.ok(readsAfterRepair >= 2, 'a queued id that reappears in the store triggers one host queue read')
+
+  // A host that keeps returning the id (or one without the repair hook) must
+  // never be polled in a loop: the episode flag holds until the id is gone.
+  t.mock.timers.tick(60000)
+  await flush()
+  assert.equal(queueReads, readsAfterRepair, 'one repair per residue episode, never a poll loop')
+})
+
+test('a removal event that outruns its own delete response does not pull the id back', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let handler = null
+  let pulls = 0
+  const counting = makeSessionsService(
+    { byId: { [ID]: { displayTitle: 'Hello world', cwd: 'C:\\x', running: false } }, ids: [ID], phase: 'ready' },
+    { onRefresh: () => { pulls += 1 } },
+  )
+  const client = makeCtx({
+    sessions: counting,
+    workspaces: undefined,
+    connection: { rpc: { call: async (_channel, method, payload) => {
+      if (method === 'session-manager/ping') return OK_PING
+      if (method === 'session-manager/deferred/list') return { ok: true, value: { sessionIds: [], recoverable: [] } }
+      if (method === 'session-manager/delete') return { ok: true, value: { sessionId: payload.sessionId, deleted: true, openAtDelete: true } }
+      throw new Error(`unexpected method ${method}`)
+    } } },
+    remote: { $on: (event, callback) => { if (event === 'api-session/removed') handler = callback; return () => {} } },
+  })
+  mod.apply(client.ctx)
+  await flush()
+  assert.equal(typeof handler, 'function', 'the plugin subscribes to api-session/removed')
+  // The rpc the inject face hands to the components IS the closure rpc, so this
+  // is the same call path the menu item uses in production.
+  const clientRpc = client.menuSpec().inject().rpc
+
+  // Host order: the removal EVENT reaches the browser before the delete RESPONSE
+  // (different channels), so the pull is scheduled while the id is not yet known
+  // to be queued. The fire-time re-check is what must stop it.
+  handler(ID)
+  await clientRpc('delete', { sessionId: ID })
+  t.mock.timers.tick(250)
+  await flush()
+  assert.equal(pulls, 0, 'a pull scheduled before its own delete response landed must not resurrect the id')
+})
+
+test('a bulk run made only of open deletes skips the whole-run list pull', async () => {
+  const fixture = bulkFixture()
+  let refreshes = 0
+  const counting = makeSessionsService(fixture.sess.list.getSnapshot(), { onRefresh: () => { refreshes += 1 } })
+  const calls = []
+  const rpc = idleRpc(calls, (payload) => Promise.resolve({ sessionId: payload.sessionId, deleted: true, openAtDelete: true }))
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(rpc, counting, fixture.ws)
+    try {
+      await act(async () => { selectAllBox(container).click() })
+      await act(async () => { bulkButton(container).click(); await settle() })
+      await confirmBulk(document.querySelector('[data-sm-confirm]'))
+
+      const deleted = calls.filter(([endpoint]) => endpoint === 'delete')
+      assert.equal(deleted.length, 2, 'both idle rows are deleted')
+      assert.equal(refreshes, 0, 'a run of open deletes must not re-pull the still-live sessions')
+      assert.ok(container.textContent.includes('deleteBulkOkOpen'), `the open-session accounting reaches the user: ${container.textContent.slice(0, 300)}`)
     } finally {
       await cleanup()
     }

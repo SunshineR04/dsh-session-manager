@@ -381,6 +381,43 @@ test('deleteSession broadcasts api-session/removed for cold and open deletions',
   assert.equal(events.length, 2, 'open-session deletes broadcast too')
 })
 
+test('deferred/list re-announces live queued removals by default, and can be switched off', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers, events } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  // Composition config with no override: the DEFAULT must repair (0.4.1+).
+  const manager = createSessionManager(ctx, {})
+  const handler = rpcHandlerFor(manager)
+
+  // Open-session delete: queued + tombstoned, and still live in the host.
+  ctx.services.sessions = { get: (id) => (id === SESSION_ID ? {} : undefined) }
+  await manager.deleteSession(SESSION_ID)
+  events.length = 0
+
+  // Default ON: the still-live queued id is re-announced, so every client drops
+  // it again (this is what keeps a "show archived" sidebar clean).
+  const listed = await handler('deferred/list', {})
+  assert.deepEqual(listed.value.sessionIds, [SESSION_ID])
+  assert.deepEqual(events, [['api-session/removed', SESSION_ID]], 'the default repairs a live queued id')
+
+  // Opt-out: the queue read is a plain read — no re-announcement.
+  const quiet = createSessionManager(ctx, { reannouncePendingRemovals: false })
+  const quietHandler = rpcHandlerFor(quiet)
+  events.length = 0
+  await quietHandler('deferred/list', {})
+  assert.deepEqual(events, [], 'the repair can still be switched off')
+
+  // An unusable liveness seam is treated as "not live", never as "live": the
+  // queue stays intact (the sweep keeps an id whose liveness check fails) and
+  // nothing is re-announced on a guess.
+  events.length = 0
+  ctx.services.sessions = { get: () => { throw new Error('liveness seam down') } }
+  const guarded = await handler('deferred/list', {})
+  assert.deepEqual(guarded.value.sessionIds, [SESSION_ID], 'a failed liveness check leaves the entry queued')
+  assert.deepEqual(events, [], 'a failed liveness check is not re-announced')
+})
+
 test('deferred/list separates recoverable ids; cancel works only for files on disk', async () => {
   const fixture = await makeFixture()
   const { ctx, headers, state, services } = makeCtx({ fixture })
@@ -395,7 +432,6 @@ test('deferred/list separates recoverable ids; cancel works only for files on di
   const openList = await handler('deferred/list', {})
   assert.deepEqual(openList.value.sessionIds, [SESSION_ID])
   assert.deepEqual(openList.value.recoverable, [])
-
   // Canceling a data-gone entry is refused: dropping its tombstone would
   // expose the artifact-less lingering summary as an ungrouped row.
   const refused = await handler('deferred/cancel', { sessionId: SESSION_ID })
