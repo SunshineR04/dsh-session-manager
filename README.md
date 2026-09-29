@@ -158,18 +158,36 @@ attachments are content-addressed and intentionally kept.
     `api-session/removed` for each queued id that is **still live**, so every
     connected client drops it again and the archived-rows view stays clean too.
     The client debounces one repair per residue episode (never a poll loop); the
-    cost is a possible one-frame flicker after a list pull. Set
+    cost is a possible one-frame flicker after a list pull. It reads the queue
+    as soon as the host answers its ping and **retries a failed read**, so one
+    transient failure cannot disable the repair for the whole page. Every other
+    list pull (the Refresh button, the post-delete check, a cancel) re-checks
+    the residue right after pulling, so a row a pull re-learned is repaired too —
+    and a bulk run containing any open-session delete skips its whole-run pull,
+    since `api-session/removed` already dropped those ids from the store. Set
     `reannouncePendingRemovals: false` to go back to the tombstone-only
     behavior, where a reload re-shows the row while archived rows are displayed.
 - **Pending banner**: the settings page lists only the sessions you can
   still act on. Entries with files on disk (e.g. a mid-delete crash leftover)
-  get a row with **Cancel deletion**, which clears the tombstone as well
-  (registry first, marker second, so a failure leaves the entry fully
-  retryable). Entries whose files are already gone (the normal open-session
+  get a row with **Cancel deletion**, which reads the queue first, then clears
+  the tombstone, then drops the marker (registry first, marker second, so a
+  failure leaves the entry fully retryable; an unreadable queue touches
+  nothing). Entries whose files are already gone (the normal open-session
   delete) have nothing left to act on, so they collapse into a single
   "already deleted · clears after restart" summary line with an optional
   expander for their ids instead of occupying the banner — and canceling one
   is refused by the host too (`session/data-gone`), not just hidden by the UI.
+- **An unreadable queue refuses instead of guessing**: the pending-delete queue
+  is the only record a queued deletion can be finished from, and every writer
+  persists the snapshot it just read — so treating a failed read as "the queue
+  is empty" would erase every marker on the next write, leaving their tombstones
+  in the archive set forever (files gone, un-restorable, un-clearable). Hence a
+  missing file is the normal empty queue, while a read failure or corrupt JSON
+  (including a torn file from the non-atomic fallback write) makes every
+  queue-dependent operation — listing, restore, cancel, open-session delete and
+  the boot sweep — refuse with `session-manager/internal`, log it, and leave the
+  file untouched. Repairing the file restores everything; a **cold** delete
+  writes no marker and reads no queue, so it is unaffected.
 - Restore only removes the id from the archive set — archiving keeps the
   workspace `sessionIds` slot, so the session returns to its previous position.
   A queued-for-deletion id is refused with `session/pending` (cancel it first

@@ -65,8 +65,13 @@ function makeCtx(overrides = {}) {
     locate(meta) {
       return { kind: 'jsonl', path: join(sessionsRoot, `--${String(meta.cwd).replace(/[\\/:]/g, '-')}--`, meta.id, 'session.jsonl.zstd') }
     },
+    // The REAL shape: `list()` yields snapshot WRAPPERS (`{ header, revision,
+    // sizeBytes }`), not bare headers — verified against the shipped
+    // `dsh-session-persistence-jsonl` and against both official consumers
+    // (`dsh-workspace`, `dsh-session-query`), which all unwrap `.header`. A flat
+    // fake here is what kept a dead artifact-resolution seam invisible.
     async list() {
-      return [...headers.values()]
+      return [...headers.values()].map((header) => ({ header, revision: 'test', sizeBytes: 0 }))
     },
   }
 
@@ -366,6 +371,50 @@ test('deleteSession still removes the artifact when the registry and persistence
   assert.deepEqual((await readdir(projcacheDir)).filter((name) => name.startsWith(SESSION_ID)), [])
 })
 
+test('the persistence header listing alone can resolve and dispose the artifact', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers, registry } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  // The artifact lives OUTSIDE the sessions root, so the raw scan cannot find
+  // it, and the registry header seam is down: only the persistence LISTING can
+  // name the directory. `list()` yields `{ header, ... }` wrappers, so reading
+  // `.id`/`.cwd` off the wrapper left this advertised middle seam a permanent
+  // no-op — with a flat test fake hiding it.
+  const outside = await mkdtemp(join(tmpdir(), 'dsm-outside-'))
+  const artifactDir = join(outside, SESSION_ID)
+  await mkdir(artifactDir, { recursive: true })
+  await writeFile(join(artifactDir, 'session.jsonl.zstd'), 'bytes')
+  registry.readSessionHeader = async () => {
+    throw new Error('header seam down')
+  }
+  ctx.services.sessionPersistence.locate = () => ({ kind: 'jsonl', path: join(artifactDir, 'session.jsonl.zstd') })
+  const manager = createSessionManager(ctx, {})
+
+  const result = await manager.deleteSession(SESSION_ID)
+  assert.equal(result.deleted, true)
+  assert.equal(result.warnings, undefined, 'the listing seam resolved the artifact; nothing may be reported missing')
+  assert.equal(existsSync(artifactDir), false, 'the artifact the listing named must be disposed')
+})
+
+test('the persistence header listing is a real fallback when the controller is absent', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers, services } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD, createdAt: 1690000000000 })
+  // The documented fallback path for a composition without a session
+  // controller: `listArchived` must project the persistence headers. Reading the
+  // snapshot wrapper as if it were the header keyed every session 'undefined',
+  // so the archived row silently lost its cwd and timestamp — and the agent
+  // tool its metadata.
+  services.sessionController = undefined
+  const manager = createSessionManager(ctx, {})
+
+  const listed = await manager.listArchived()
+  assert.equal(listed.items.length, 1)
+  assert.equal(listed.items[0].sessionId, SESSION_ID)
+  assert.equal(listed.items[0].cwd, CWD)
+  assert.equal(listed.items[0].updatedAt, 1690000000000)
+})
+
 test('deleteSession broadcasts api-session/removed for cold and open deletions', async () => {
   const fixture = await makeFixture()
   const { ctx, headers, events } = makeCtx({ fixture })
@@ -474,6 +523,74 @@ test('pending queue drops malformed ids before they can reach the filesystem', a
   assert.ok(existsSync(canary), 'malformed ids must never reach the filesystem')
   assert.deepEqual(result.deleted, [SESSION_ID])
   assert.deepEqual(await manager.readPending(), [], 'the sanitized write-back purges malformed entries')
+})
+
+test('an unreadable pending queue is refused, never rewritten from an empty view', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers, state, events } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  headers.set(OTHER_ID, { id: OTHER_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  await writeSessionFiles(fixture, OTHER_ID)
+  // SESSION_ID is OPEN in this process: its delete is the path that must write a
+  // pending marker (and therefore must read the queue first).
+  ctx.services.sessions = { get: (id) => (id === SESSION_ID ? {} : undefined) }
+  const warnings = []
+  ctx.logger = { warn: (message) => warnings.push(String(message)), info: () => {} }
+  const manager = createSessionManager(ctx, {})
+  const handler = rpcHandlerFor(manager)
+  const sessionDir = (id) => join(fixture.sessionsRoot, `--${CWD.replace(/[\\/:]/g, '-')}--`, id)
+
+  // A half-written queue file: the cross-device fallback writes in place, so a
+  // crash (or a concurrent reader) can catch it torn. Whatever it holds, it must
+  // read as UNREADABLE — not as "the queue is empty". Every writer ends by
+  // persisting the snapshot it just read, so a tolerant `[]` here would drop the
+  // live markers on the next write-back and leave their tombstones in the
+  // archive set with no queue entry to sweep them, while their files are already
+  // gone: permanently stuck, un-restorable ghost rows — the exact "the deleted
+  // session came back" shape this queue exists to prevent.
+  const torn = '{"version":1,"sessionIds":["session-3012b8a0'
+  await writeFile(manager.pendingFile(), torn, 'utf8')
+
+  // Every queue-dependent operation refuses, and each reports the same stable
+  // code with the underlying reason. A tolerant read would instead delete the
+  // session, un-tombstone it, or publish an empty queue.
+  for (const [endpoint, payload] of [
+    ['list', {}],
+    ['deferred/list', {}],
+    ['delete', { sessionId: SESSION_ID }],
+    ['restore', { sessionId: SESSION_ID }],
+    ['deferred/cancel', { sessionId: SESSION_ID }],
+  ]) {
+    const answer = await handler(endpoint, payload)
+    assert.equal(answer.ok, false, `${endpoint} must refuse an unreadable queue`)
+    assert.equal(answer.error.code, 'session-manager/internal', `${endpoint} must report the queue failure`)
+    assert.equal(typeof answer.error.details.reason, 'string', `${endpoint} must carry the reason`)
+  }
+  await assert.rejects(manager.sweepPending(), (error) => error.code === 'session-manager/internal')
+
+  // Nothing was mutated on the way: no artifact removed, no archive change, no
+  // broadcast, and the torn file is left byte-for-byte as it was found.
+  assert.equal(existsSync(sessionDir(SESSION_ID)), true, 'a refused delete must not dispose the artifact')
+  assert.deepEqual(state.archivedSessionIds, [SESSION_ID], 'nor touch the archive set')
+  assert.deepEqual(events, [], 'nor broadcast a removal')
+  assert.equal(readFileSync(manager.pendingFile(), 'utf8'), torn, 'the queue file is left exactly as found')
+  assert.ok(warnings.some((line) => line.includes('pending-delete queue could not be read')), 'the refusal is logged where it is created, so no caller can swallow it silently')
+
+  // The refusal is scoped to the queue: a COLD delete writes no marker and reads
+  // no queue, so it still works — the guard must not become a plugin-wide outage.
+  const cold = await handler('delete', { sessionId: OTHER_ID })
+  assert.equal(cold.ok, true, 'a cold delete does not depend on the pending queue')
+  assert.equal(existsSync(sessionDir(OTHER_ID)), false)
+
+  // And it is not a one-way door: repairing the file restores every path.
+  await manager.writePending([SESSION_ID])
+  const listed = await handler('deferred/list', {})
+  assert.equal(listed.ok, true)
+  assert.deepEqual(listed.value.sessionIds, [SESSION_ID])
+  const removed = await handler('delete', { sessionId: SESSION_ID })
+  assert.equal(removed.ok, true)
+  assert.equal(existsSync(sessionDir(SESSION_ID)), false)
 })
 
 test('a queue add racing the sweep survives the sweep write-back (operation lock)', async () => {

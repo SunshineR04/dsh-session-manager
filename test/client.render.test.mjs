@@ -286,6 +286,10 @@ test('refresh button spins while a refresh is in flight', async () => {
     if (endpoint === 'ping') return Promise.resolve({ version: '0.2.1', menuDeleteAvailable: true })
     return new Promise(() => {})
   }
+  // The Refresh button now pulls through the injected helper, which resolves
+  // `getSessions()` itself — so the fake must be installed in the registry too,
+  // not only handed to the component as a prop.
+  const restoreSessions = useSessionsService(sessionsRefreshing)
   const { container, cleanup } = await renderSection(rpc, sessionsRefreshing)
   try {
     const button = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'refresh')
@@ -301,6 +305,7 @@ test('refresh button spins while a refresh is in flight', async () => {
     assert.equal(button.disabled, false, 'button re-enabled after the refresh')
   } finally {
     await cleanup()
+    restoreSessions()
   }
 })
 
@@ -1130,6 +1135,57 @@ test('a removal event that outruns its own delete response does not pull the id 
   assert.equal(pulls, 0, 'a pull scheduled before its own delete response landed must not resurrect the id')
 })
 
+test('a failed first queue read does not disarm the residue repair', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let handler = null
+  let pulls = 0
+  let queueReads = 0
+  const counting = makeSessionsService(
+    { byId: { [ID]: { displayTitle: 'Hello world', cwd: 'C:\\x', running: false } }, ids: [ID], phase: 'ready' },
+    { onRefresh: () => { pulls += 1 } },
+  )
+  const client = makeCtx({
+    sessions: counting,
+    workspaces: undefined,
+    connection: { rpc: { call: async (_channel, method) => {
+      if (method === 'session-manager/ping') return OK_PING
+      if (method === 'session-manager/deferred/list') {
+        queueReads += 1
+        // One transient failure of the very read that arms the residue block.
+        if (queueReads === 1) throw new Error('transient queue read failure')
+        return { ok: true, value: { sessionIds: [ID], recoverable: [] } }
+      }
+      throw new Error(`unexpected method ${method}`)
+    } } },
+    remote: { $on: (event, callback) => { if (event === 'api-session/removed') handler = callback; return () => {} } },
+  })
+  mod.apply(client.ctx)
+  await flush()
+  assert.equal(queueReads, 1, 'the seed read is attempted as soon as the host answers the ping')
+
+  // The read FAILED, so the block is not armed yet: `pendingDeleteIds` is empty
+  // and no store watch exists. Marking the seed from the ping alone (which only
+  // proves the host is reachable) left it that way for the page's lifetime — the
+  // removal event below would then pull the husk straight back into the store
+  // and the host repair would never be asked: the 0.4.1 field bug, silently.
+  t.mock.timers.tick(1000)
+  await flush()
+  assert.equal(queueReads, 2, 'a failed seed read is retried, so the repair cannot be disarmed by one failure')
+
+  handler(ID)
+  t.mock.timers.tick(250)
+  await flush()
+  assert.equal(pulls, 0, 'once a read has landed, a queued id is never pulled back')
+
+  // That landed read is also what arms the host repair.
+  t.mock.timers.tick(1000)
+  await flush()
+  assert.equal(queueReads, 3, 'the residue watch asks the host once per episode')
+  t.mock.timers.tick(60000)
+  await flush()
+  assert.equal(queueReads, 3, 'and the repair is never a poll loop')
+})
+
 test('a bulk run made only of open deletes skips the whole-run list pull', async () => {
   const fixture = bulkFixture()
   let refreshes = 0
@@ -1151,4 +1207,91 @@ test('a bulk run made only of open deletes skips the whole-run list pull', async
       await cleanup()
     }
   })
+})
+
+test('a mixed bulk run does not re-pull the list over its queued open delete', async () => {
+  const fixture = bulkFixture()
+  let refreshes = 0
+  const counting = makeSessionsService(fixture.sess.list.getSnapshot(), { onRefresh: () => { refreshes += 1 } })
+  const calls = []
+  // One COLD delete (ID2) and one OPEN delete (ID) in the same run. The pull
+  // exists to catch up on the cold id, but it re-learns the still-live open id
+  // as well — the host keeps listing that in-memory copy, so the tombstone lands
+  // back in the store. ANY open delete in the run therefore skips the pull; the
+  // cold id is already dropped locally by `api-session/removed`.
+  const rpc = idleRpc(calls, (payload) => Promise.resolve({
+    sessionId: payload.sessionId,
+    deleted: true,
+    ...(payload.sessionId === ID ? { openAtDelete: true } : {}),
+  }))
+  await withLayout(async () => {
+    // The closure's `getSessions()` is what a pull resolves, so the fake has to
+    // be installed there too — not just handed to the component as a prop.
+    const restoreSessions = useSessionsService(counting)
+    const { container, cleanup } = await renderSection(rpc, counting, fixture.ws)
+    try {
+      await act(async () => { selectAllBox(container).click() })
+      await act(async () => { bulkButton(container).click(); await settle() })
+      await confirmBulk(document.querySelector('[data-sm-confirm]'))
+
+      const deleted = calls.filter(([endpoint]) => endpoint === 'delete')
+      assert.equal(deleted.length, 2, 'both idle rows are deleted')
+      assert.equal(refreshes, 0, 'a run containing an open delete must not pull the queued husk back')
+    } finally {
+      await cleanup()
+      restoreSessions()
+    }
+  })
+})
+
+test('an explicit list pull re-checks the residue even when the store cannot be watched', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let queueReads = 0
+  // The store starts WITHOUT the husk (a fresh page) and every pull re-learns
+  // the host's list, which still holds the live copy of the queued id. Its
+  // subscription THROWS here, so `watchSessionStore` cannot install the store
+  // watch — the seam the repair normally rides on. A pull must therefore
+  // re-check the residue itself, or the tombstone it just pulled back stays
+  // rendered in the archived-views sidebar until some later queue read.
+  const husk = { byId: { [ID]: { displayTitle: 'Hello world', cwd: 'C:\\x', running: false } }, ids: [ID], phase: 'ready' }
+  const empty = { byId: {}, ids: [], phase: 'ready' }
+  let snapshot = empty
+  const unwatchable = {
+    list: {
+      subscribe: () => { throw new Error('this store cannot be observed') },
+      getSnapshot: () => snapshot,
+    },
+    refresh: async () => { snapshot = husk },
+  }
+  const client = makeCtx({
+    sessions: unwatchable,
+    workspaces: undefined,
+    connection: { rpc: { call: async (_channel, method) => {
+      if (method === 'session-manager/ping') return OK_PING
+      if (method === 'session-manager/deferred/list') {
+        queueReads += 1
+        return { ok: true, value: { sessionIds: [ID], recoverable: [] } }
+      }
+      throw new Error(`unexpected method ${method}`)
+    } } },
+    remote: undefined,
+  })
+  mod.apply(client.ctx)
+  await flush()
+  assert.equal(queueReads, 1, 'the seed read lands and arms the block')
+  t.mock.timers.tick(60000)
+  await flush()
+  assert.equal(queueReads, 1, 'nothing to repair while the husk is not in the store')
+
+  const pull = client.sectionSpec().inject().pullSessions
+  assert.equal(typeof pull, 'function', 'the surfaces must receive the pull that re-checks the residue')
+  await pull()
+  t.mock.timers.tick(300)
+  await flush()
+  assert.equal(queueReads, 2, 'the pull brought the husk back, so the host is asked to repair it')
+
+  await pull()
+  t.mock.timers.tick(3000)
+  await flush()
+  assert.equal(queueReads, 2, 'one repair per residue episode — a repeated pull never starts a poll loop')
 })

@@ -137,3 +137,59 @@ test('the installed dsh client service still carries the surface this plugin use
     }
   }
 })
+
+// ── the installed persistence snapshot shape (host half) ─────────────────────
+//
+// `sessionPersistence.list()` hands back `{ header, revision, sizeBytes }`
+// WRAPPERS, not bare headers. `lib/index.js` unwraps `.header` in both places it
+// reads the listing (the summary fallback and the artifact-resolution seam), and
+// reading the wrapper as the header silently keyed every session `'undefined'`
+// and reduced that seam to a no-op — while the host test's fake, which returned
+// flat headers, kept the suite green the whole time. Same "mock mirrors the
+// invention" class as the client surface check above, on the host side of the
+// wire: the fake was fixed, and this is the guard that would have caught it.
+
+const installedPersistenceModule = () => {
+  const candidates = [
+    join(here, '..', 'node_modules', '@deepseek-ai', 'dsh-session-persistence-jsonl', 'lib', 'index.js'),
+    join(homedir(), '.dsh', 'profiles', 'node_modules', '@deepseek-ai', 'dsh-session-persistence-jsonl', 'lib', 'index.js'),
+    join(homedir(), 'AppData', 'Roaming', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-session-persistence-jsonl', 'lib', 'index.js'),
+  ]
+  return candidates.find((candidate) => existsSync(candidate))
+}
+
+/**
+ * The surface `lib/index.js` depends on: a `list()` that yields snapshot
+ * wrappers. Deliberately NOT the wrapper's field-by-field body — an upstream
+ * rename of `revision`/`sizeBytes` is harmless to us, a change of the outer
+ * shape is not.
+ */
+function assertSnapshotShape(source, label) {
+  assert.match(source, /async\s+list\s*\(/, `${label}: the backend no longer exposes async list()`)
+  assert.match(source, /\.push\(\{\s*header\s*:/, `${label}: list() no longer yields { header, revision, sizeBytes } wrappers — lib/index.js unwraps .header`)
+}
+
+const SNAPSHOT_FIXTURES = {
+  // The shape shipped today (both installed copies match it).
+  current: 'async list(options) {\n\t\t\tconst snapshots = [];\n\t\t\tsnapshots.push({\n\t\t\t\theader: artifact.header,\n\t\t\t\trevision: fileRevision(identity),\n\t\t\t\tsizeBytes: Number(identity.size)\n\t\t\t});\n\t\t\treturn snapshots;\n\t\t}',
+  // A harmless upstream refactor: the wrapper stays, the locals are renamed.
+  renamed: 'async list() {\n\t\t\tconst emitted = [];\n\t\t\temitted.push({ header: entry.header, revision: entry.revision });\n\t\t\treturn emitted;\n\t\t}',
+  // The shape this plugin used to assume, and must fail loudly on.
+  bareHeader: 'async list() {\n\t\t\tconst snapshots = [];\n\t\t\tsnapshots.push(artifact.header);\n\t\t\treturn snapshots;\n\t\t}',
+}
+
+test('the snapshot-shape predicate keeps the wrapper this plugin unwraps, and nothing more', () => {
+  assertSnapshotShape(SNAPSHOT_FIXTURES.current, 'current')
+  assertSnapshotShape(SNAPSHOT_FIXTURES.renamed, 'renamed')
+  assert.throws(() => assertSnapshotShape(SNAPSHOT_FIXTURES.bareHeader, 'fixture'), /wrappers/)
+  assert.throws(() => assertSnapshotShape('nothing here', 'fixture'), /async list\(\)/)
+})
+
+test('the installed persistence backend still yields the snapshot wrapper this plugin unwraps', (t) => {
+  const modulePath = installedPersistenceModule()
+  if (modulePath === undefined) {
+    t.skip('no installed dsh persistence backend found — this guard is local-only')
+    return
+  }
+  assertSnapshotShape(readFileSync(modulePath, 'utf8'), modulePath)
+})

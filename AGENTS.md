@@ -42,6 +42,11 @@ pnpm test   # node --check on both libs + host + client render + contract tests
   outside `PRIMITIVE_NAMES`, and stubs `MenuItemButton` as a real clickable
   `role="menuitem"` button (the icons' bare `() => null` would make the menu
   row's behaviour unreachable).
+  A second local-only guard pins the HOST side: `assertSnapshotShape()` checks
+  that the installed persistence backend's `list()` still yields
+  `{ header, … }` wrappers (three inline fixtures: the current shape and a
+  renamed wrapper must pass, a bare header must fail) — the shape `lib/index.js`
+  unwraps, and the one whose absence had a seam silently dead.
 - **dsh 0.1.7 line required.** Both hard dependencies arrived in it: the
   size-neutral product icons, and the `sidebar.workspaces.session.menu.item`
   slot (present from 0.1.7-alpha.1 — 0.1.5-rc.1, 0.1.5-rc.3 and 0.1.6-alpha.1
@@ -199,6 +204,18 @@ plugin row; `dsh plugin add` applies it):
   deletion. Hence: the detach also checks `workspace.record.sessionIds` (raw
   record), and the artifact directory is resolved through three seams (header
   `locate` → persistence header listing → raw scan of the sessions root).
+  ⚠ The middle seam reads `sessionPersistence.list()`, which yields
+  `{ header, revision, sizeBytes }` **wrappers**, never bare headers (verified
+  against the shipped `dsh-session-persistence-jsonl`, which pushes
+  `header: artifact.header`, and against both official consumers —
+  `dsh-workspace`, `dsh-session-query` — which both do
+  `.map((snapshot) => snapshot.header)`). Reading the wrapper as the header
+  matched nothing (`String(undefined) !== sessionId`) and silently reduced that
+  seam to a no-op; the host test's fake returned flat headers, which is why the
+  suite stayed green. Both read sites (`resolveSessionDirs` and the
+  `collectSummaries` fallback) unwrap `.header`, skip — and warn once about — an
+  entry without one, and `test/contract.test.mjs` pins the wrapper against the
+  installed backend with three inline fixtures.
 - **`api-session/removed` must be emitted after a real delete**: the host only
   emits it itself when a *live* session is disposed, so a cold delete would
   otherwise linger in every connected client's list store forever (the client
@@ -206,7 +223,7 @@ plugin row; `dsh plugin add` applies it):
   `dsh-api-session-controller/lib/client.js`). The sidebar's 未分组/ungrouped
   bucket is "every session in the client list store not accounted by any
   workspace and not archived" — any stale summary there *is* a resurrection.
-- **An open-session delete leaves a residue — three rules, all load-bearing**
+- **An open-session delete leaves a residue — four rules, all load-bearing**
   (evidence in `docs/analysis-deleted-open-session-still-listed.md` §8):
   1. **The client must never pull the list for a queued id.**
      `pendingDeleteIds` is fed by the `rpc` wrapper (`deferred/list` union;
@@ -218,6 +235,14 @@ plugin row; `dsh plugin add` applies it):
      checks the set **when scheduling AND when firing**: the delete RESPONSE and
      the event travel on different channels and the event usually arrives first,
      so a schedule-time-only guard still pulls the husk back (e2e-proven).
+     Every OTHER pull — the Refresh button, `refreshUntilGone`, a cancel, the
+     bulk run — goes through the injected `pullSessions`, which re-checks the
+     residue right after pulling: the store subscription already covers an
+     observable store, and that explicit `evaluateResidue()` is the only trigger
+     when `list.subscribe` is missing or throws. A bulk run containing ANY open
+     delete skips its whole-run pull (`deleted > 0 && openDeleted === 0`):
+     `api-session/removed` already dropped those ids locally, and the pull would
+     re-learn the still-live copies.
   2. **The tombstone hides the residue in the DEFAULT view only.** 视图选项 →
      全部对话（显示已归档）/仅显示已归档 renders archived strays inside the
      ungrouped bucket — that is the reported "deleted session came back".
@@ -237,11 +262,27 @@ plugin row; `dsh plugin add` applies it):
      config-driven same-id start stalls, and `session/disposed` listeners write
      artifacts back (projection-cache checkpoint; JSONL final drain through a
      `mkdir`-ing path). Full list in the analysis doc §8.1.
-  Regression cover: `test/host.test.mjs` ("deferred/list can re-announce…"),
-  `test/client.render.test.mjs` ("a removal event for a queued id…", "a removal
-  event that outruns its own delete response…", "a bulk run made only of open
-  deletes…") and `scripts/e2e-residue.mjs` (real Chrome: after a menu delete of
-  an open session the id renders in NEITHER view).
+  4. **The residue block is armed by a SUCCESSFUL queue read, never by the
+     ping.** `pendingDeleteIds` and the store watch are installed only in
+     `observePending`, i.e. only by a `deferred/list` that landed; the ping
+     proves the host is reachable and nothing more. Marking the seed from the
+     ping left the block disarmed for the page's lifetime whenever that first
+     read failed — the event-driven pull re-materialised every husk and the host
+     repair was never asked, silently: rules 1–2 both inoperative in the exact
+     field scenario they exist for (proven by probe: `pulls` 0 with the seed,
+     1 without it). So `observePending` sets `pendingSeeded` and
+     `seedPendingQueue` retries a failed seed with the ping's own 1s/3s backoff,
+     then gives up with one `console.warn` — keep it retried, and keep the
+     pending-seed timer in the teardown disposer.
+  Regression cover: `test/host.test.mjs` ("deferred/list can re-announce…",
+  "the persistence header listing alone…", "the persistence header listing is a
+  real fallback…"), `test/client.render.test.mjs` ("a removal event for a queued
+  id…", "a removal event that outruns its own delete response…", "a failed first
+  queue read does not disarm the residue repair", "a bulk run made only of open
+  deletes…", "a mixed bulk run does not re-pull…", "an explicit list pull
+  re-checks the residue even when the store cannot be watched") and
+  `scripts/e2e-residue.mjs` (real Chrome: after a menu delete of an open session
+  the id renders in NEITHER view).
 - **Open (live-idle) sessions delete immediately, via a tombstone**: dsh has no
   public "close session" API — the in-memory summary outlives the delete (its
   owner scope is the session-controller service scope, not the UI view), but
@@ -257,8 +298,11 @@ plugin row; `dsh plugin add` applies it):
   already gone). The settings page additionally filters queued ids out of its
   rows (client-side, via `pendingIds`). `deferred/list` reports which queued
   ids are still `recoverable` (artifact dir on disk); `deferred/cancel`
-  (`cancelPending`) clears the tombstone FIRST and only then drops the marker
-  (a registry failure then leaves the entry fully queued and retryable), and
+  (`cancelPending`) READS the queue first, then clears the tombstone, then drops
+  the marker — a registry failure leaves the entry fully queued and retryable,
+  and an unreadable queue fails before anything is touched (reading AFTER the
+  tombstone was cleared would leave "no tombstone + still queued", and the next
+  boot would finish the deletion the user just cancelled). It also
   REFUSES entries whose files are already gone (`session/data-gone`) —
   un-tombstoning one would expose the artifact-less lingering summary as an
   ungrouped row, so the UI's hidden cancel button is a protocol rule, not a
@@ -283,8 +327,25 @@ plugin row; `dsh plugin add` applies it):
   shapes proven by probes; both have regression tests). The lock is NOT
   reentrant: locked bodies (`deleteLocked`, `cancelPending`,
   `finishDeferredDeletion`) use the `_addPending`/`_removePending` internals,
-  never the public lock-taking wrappers. `readPending` is lock-free by design
+  never the public lock-taking wrappers. The queue READ is lock-free by design
   (atomic-rename writes; callers only ever want a snapshot).
+- **An unreadable pending-delete queue is REFUSED, never reported as empty.**
+  `readPendingSnapshot()` separates the two cases: ENOENT is the normal empty
+  queue, while a read failure or unparseable JSON (a torn file counts — the
+  cross-device fallback write is NOT atomic) comes back `degraded`. Every writer
+  persists the snapshot it just read, so a tolerant `[]` on a failed read
+  publishes that empty view on the next write-back and drops every live marker;
+  their tombstones then stay in the archive set with no queue entry left to
+  sweep them while their files are already gone, so `listArchived` un-hides them
+  as rows `restoreSession` can never restore — permanently stuck ghost rows,
+  the very "the deleted session came back" shape. Hence `_addPending`,
+  `_removePending`, `sweepPending` (its closing full-list write-back is the
+  destructive one), `listArchived` and `restoreLocked` all refuse with
+  `session-manager/internal`, and `pendingQueueUnreadable` logs at the point the
+  error is created so no caller can swallow it silently (the ping sweep is
+  fire-and-forget). The refusal is scoped to queue-dependent work: a COLD delete
+  writes no marker and reads no queue, so it still proceeds. Regression cover:
+  `test/host.test.mjs` ("an unreadable pending queue is refused…").
 - `sessionId` is validated by `SESSION_ID_PATTERN` at the **manager choke
   point** — `assertSessionId` is the first statement of `deleteSession`,
   `restoreSession` and `cancelPending`, so EVERY entry (RPC channel, agent
