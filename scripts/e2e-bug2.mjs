@@ -1,17 +1,32 @@
 // Reproduce bug 2: delete an archived session from the settings page and
 // watch whether it lingers in the sidebar, before and after a page reload.
+//
+// DESTRUCTIVE: it clicks the settings Delete row and CONFIRMS it, so it must
+// run against a seeded disposable home only.
+// Usage: node scripts/e2e-bug2.mjs <url> <e2e-home-win-path> [outdir]
 import { mkdir } from 'node:fs/promises'
 import puppeteer from 'puppeteer-core'
 
+import { assertDisposableHome } from './e2e-guard.mjs'
+
 const url = process.argv[2]
-const outDir = process.argv[3] || 'e2e-artifacts'
-if (!url) {
-  console.error('usage: node scripts/e2e-bug2.mjs <url> [outdir]')
+const e2eHome = process.argv[3]
+const outDir = process.argv[4] || 'e2e-artifacts'
+if (!url || !e2eHome) {
+  console.error('usage: node scripts/e2e-bug2.mjs <url> <e2e-home-win-path> [outdir]')
+  process.exit(2)
+}
+// A URL alone cannot prove which home the instance serves: refuse anything but
+// a home scripts/e2e-seed.mjs created (see scripts/e2e-guard.mjs).
+try {
+  assertDisposableHome(e2eHome, { script: 'e2e-bug2' })
+} catch (error) {
+  console.error(error.message)
   process.exit(2)
 }
 await mkdir(outDir, { recursive: true })
 const browser = await puppeteer.launch({
-  executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  executablePath: process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe',
   headless: true,
   args: ['--no-sandbox', '--disable-gpu', '--window-size=1440,900'],
   defaultViewport: { width: 1440, height: 900 },

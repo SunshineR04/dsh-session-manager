@@ -1,10 +1,28 @@
 // Live-session lifecycle experiment v2: open session -> menu delete (expect
 // session/running refusal) -> switch to another session -> menu delete again.
+//
+// DESTRUCTIVE: `menuDelete()` clicks the confirm button, so this must run
+// against a seeded disposable home only.
+// Usage: node scripts/e2e-live.mjs <url> <e2e-home-win-path>
 import { join, dirname } from 'node:path'
 import puppeteer from 'puppeteer-core'
 
+import { assertDisposableHome } from './e2e-guard.mjs'
+
 const url = process.argv[2]
-if (!url) process.exit(2)
+const e2eHome = process.argv[3]
+if (!url || !e2eHome) {
+  console.error('usage: node scripts/e2e-live.mjs <url> <e2e-home-win-path>')
+  process.exit(2)
+}
+// A URL alone cannot prove which home the instance serves: refuse anything but
+// a home scripts/e2e-seed.mjs created (see scripts/e2e-guard.mjs).
+try {
+  assertDisposableHome(e2eHome, { script: 'e2e-live' })
+} catch (error) {
+  console.error(error.message)
+  process.exit(2)
+}
 const { readFile } = await import('node:fs/promises')
 const { fileURLToPath } = await import('node:url')
 const spec = await (async () => {
@@ -22,7 +40,7 @@ const otherWorkspaceTitle = (() => {
 // the gitignored local spec (or the env), never in the repo.
 const TITLE = spec.targetSessionTitle ?? process.env.E2E_SESSION_TITLE ?? 'Greeting'
 const browser = await puppeteer.launch({
-  executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  executablePath: process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe',
   headless: true,
   args: ['--no-sandbox', '--disable-gpu', '--window-size=1440,900'],
   defaultViewport: { width: 1440, height: 900 },

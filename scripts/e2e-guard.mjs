@@ -16,11 +16,19 @@ export const E2E_MARKER = '.session-manager-e2e'
 
 /**
  * Refuse anything that is not a seeded, disposable e2e home.
+ *
+ * EVERY script that deletes or mutates sessions must call this, and must call
+ * it BEFORE its first filesystem write — `scripts/e2e-seed.mjs` included, which
+ * recursively removes `sessions/` and `storages/` before it writes the marker.
  * @param home - the `DISPOSABLE` home path the caller was given.
  * @param script - the calling script's name, for the error message.
+ * @param allowUnseeded - accept a home that has no marker yet (the SEED itself
+ *   must, since it is what writes the marker). The real-home refusal still
+ *   applies; callers that pass this must add their own "is it safe to write
+ *   here" rule on top (see `e2e-seed.mjs`).
  * @throws when the home is missing, is the real dsh home, or was not seeded.
  */
-export function assertDisposableHome(home, { script }) {
+export function assertDisposableHome(home, { script, allowUnseeded = false } = {}) {
   if (typeof home !== 'string' || home.trim() === '') {
     throw new Error(`${script}: an isolated DSH_HOME is required — pass the home scripts/e2e-seed.mjs created (--home <path>)`)
   }
@@ -30,7 +38,7 @@ export function assertDisposableHome(home, { script }) {
     throw new Error(`${script}: refusing to run against the REAL dsh home (${realHome}); seed a disposable one with scripts/e2e-seed.mjs`)
   }
   const marker = join(target, E2E_MARKER)
-  if (!existsSync(marker)) {
+  if (!existsSync(marker) && !allowUnseeded) {
     throw new Error(`${script}: ${target} is not a seeded e2e home (no ${E2E_MARKER}); run: node scripts/e2e-seed.mjs "${target}"`)
   }
   return { home: target, marker }

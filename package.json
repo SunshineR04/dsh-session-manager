@@ -6,8 +6,8 @@
   "type": "module",
   "main": "lib/index.js",
   "scripts": {
-    "check": "node --check lib/index.js && node --check lib/client.js",
-    "test": "pnpm run check && node --test test/host.test.mjs test/client.render.test.mjs test/contract.test.mjs"
+    "check": "node --check lib/index.js && node --check lib/pending-queue.js && node --check lib/session-summaries.js && node --check lib/artifact-paths.js && node --check lib/client.js",
+    "test": "pnpm run check && node --test test/pending-queue.test.mjs test/session-summaries.test.mjs test/artifact-paths.test.mjs test/host.test.mjs test/client.render.test.mjs test/contract.test.mjs"
   },
   "exports": {
     ".": "./lib/index.js",
@@ -17,14 +17,19 @@
   },
   "files": [
     "lib/index.js",
+    "lib/pending-queue.js",
+    "lib/session-summaries.js",
+    "lib/artifact-paths.js",
     "lib/client.js",
     "cordis.patch.yml",
     "README.md",
     "README.zh.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "dsh": ">=0.1.7"
   },
   "keywords": [
     "deepseek-harness",

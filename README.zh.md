@@ -57,7 +57,7 @@ DSH 插件：**彻底删除会话**（永久物理删除，回收磁盘），配
 | --- | --- |
 | `session_list_archived` | 列出已归档会话（JSON） |
 | `session_restore_archived` | 按 id 恢复（可逆操作，无需确认） |
-| `session_delete_permanently` | 按 id 彻底删除；**必须 `confirm: true`**；拒绝删除正在运行的会话 |
+| `session_delete_permanently` | 按 id 彻底删除**已归档**会话；**必须 `confirm: true`**；拒绝未知 id、未归档 id 与正在运行的会话 |
 
 ## 安装
 
@@ -73,7 +73,13 @@ dsh plugin --profile <name> add "file:<克隆目录的绝对路径>"
 
 `dsh plugin add` 会通过 pnpm 安装并自动把包加入 `dsh.profile.bundles`；
 本包的 `cordis.patch.yml`（bundle layer）自动挂载插件行，无需手改配置。
-**安装后需重启 dsh 桌面端**（新 bundle 不会热加载）。
+刷新页面后若插件仍未出现，再重启 dsh 桌面端（运行中的 profile 会在刷新时重建
+大部分 patch，但新加入的 bundle 不保证会被拾取）。
+
+> ⚠ **不要用裸 npm 包名安装本插件。** npm 上的 `dsh-session-manager` 是**另一个
+> 无关项目**（[hkkz9522/dsh-session-manager](https://github.com/hkkz9522/dsh-session-manager)，
+> 已发布到 0.5.x，维护者不同），它同样会注册一个会话菜单行——所以装错也会"看起来能用"。
+> 请按上面的方式从本仓库安装。
 
 也可以在 profile 的 `cordis.patch.yml` 手工挂载（不推荐，bundle 通道更省事）：
 
@@ -140,7 +146,7 @@ dsh plugin --profile <name> add "file:<克隆目录的绝对路径>"
   最后摘标记——注册表失败时条目完整保留、可安全重试，队列读不出来时什么都不会
   被改动。文件已删净的条目（打开
   会话的正常删除）已无任何可执行动作，因此不再逐行占据横幅，而是折叠为
-  一行「已彻底删除 · 重启后自动清理」汇总（附展开按钮可查看具体 id）——
+  一行「已删除 · 重启后自动清理」汇总（附展开按钮可查看具体 id）——
   这也不仅是 UI 隐藏：通过 RPC/工具取消它同样会被宿主以
   `session/data-gone` 拒绝（解除墓碑只会让无文件的内存残留以「未分组」复活）。
 - **队列文件读不出来时，宁可不做也不猜**：待删队列是删除收尾的唯一凭据，
@@ -173,15 +179,15 @@ pnpm install
 pnpm test   # 语法检查 + 宿主单测 + 客户端渲染冒烟测试
 ```
 
+**开发环境需要 Node ≥ 22.22.2**——渲染测试在 jsdom 里挂载 React，而 jsdom 30
+声明 `^22.22.2 || ^24.15.0 || >=26`。插件本身在 Node ≥ 20 即可运行
+（`engines.node`），只有测试套件需要更新的运行时。
+
 渲染测试（`test/client.render.test.mjs`）用 React + jsdom 真实挂载设置页
 组件，能抓住宿主单测覆盖不到的 UI 崩溃（如 hooks 顺序 / 变量提升错误）。
 
-接入验证：新建临时 profile 挂载本插件后
-
-```bash
-dsh --profile <test-profile> --dump-config    # 检查 bundle 组装
-dsh --profile <test-profile> --help           # 完整启动（headless 模板）
-```
+接入验证请走下方「浏览器 E2E」：`scripts/e2e-seed.mjs` 建一个带标记的一次性
+`DSH_HOME`，`scripts/e2e-check.mjs` 在真实 UI 里做只读断言。
 
 ### 浏览器端到端验证（可选）
 
@@ -208,6 +214,13 @@ node scripts/e2e-residue.mjs <URL> --home <e2e-home>  # 5. 残留验收：两个
 ⚠ 第 4、5 步会**真的删除会话**：`--home`（或第二个参数）现在必须有值，且该 home
 必须带 `scripts/e2e-seed.mjs` 写下的标记文件——缺少标记（或指向真实 `~/.dsh`）时脚本
 直接拒绝运行，因为只凭一个 URL 无法证明它背后是哪个 home（见 `scripts/e2e-guard.mjs`）。
+
+其余脚本是**诊断工具，不是验收测试**：`e2e-bug2.mjs` 与 `e2e-live.mjs` 复现已修
+的现场 bug（两者都会真删会话，都有守卫），`e2e-realclick.mjs` 与 `e2e-probe.mjs`
+是一次性的 DOM 侦察。只有 `e2e-residue.mjs`、`e2e-dialog-style.mjs`、
+`e2e-realclick.mjs` 和 guard 本身**会失败**——其余脚本无论发生什么都打印一份
+过程记录并以 0 退出，所以请看它的输出，而不是退出码。Chrome 不在默认路径时
+设置 `CHROME_PATH`。
 
 ## 参考项目
 

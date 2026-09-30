@@ -12,7 +12,7 @@ if (!url) {
 }
 await mkdir(outDir, { recursive: true })
 const browser = await puppeteer.launch({
-  executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  executablePath: process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe',
   headless: true,
   args: ['--no-sandbox', '--disable-gpu', '--window-size=1440,900'],
   defaultViewport: { width: 1440, height: 900 },

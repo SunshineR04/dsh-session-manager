@@ -18,13 +18,21 @@ import { createRoot } from 'react-dom/client'
 //
 // `MenuItemButton` is stubbed as a real clickable `role="menuitem"` button: the
 // menu-item tests must click it, so the icons' bare `() => null` would make the
-// behaviour under test unreachable.
+// behaviour under test unreachable. It also RECORDS the props it was given —
+// `danger`/`separatorBefore`/`icon` are invisible in a text snapshot, so before
+// this the "red destructive row" was asserted only by a manual e2e run and
+// dropping them kept the suite green.
 const PRIMITIVE_NAMES = ['IconArchiveOutlineRegular', 'IconCheckOutlineRegular', 'IconLoadingOutlineRegular', 'IconRefreshOutlineRegular', 'IconTrashOutlineRegular', 'IconWarningOutlineRegular']
+/** Props of the most recent `MenuItemButton` render (see `renderMenuItem`). */
+let lastMenuButtonProps = null
 const requireShim = (name) => {
   if (name === 'react') return React
   if (name === '@deepseek-ai/dsh-client-ui-primitives') {
     const stubs = Object.fromEntries(PRIMITIVE_NAMES.map((icon) => [icon, () => null]))
-    stubs.MenuItemButton = ({ children, onSelect }) => React.createElement('button', { type: 'button', role: 'menuitem', onClick: onSelect }, children)
+    stubs.MenuItemButton = (props) => {
+      lastMenuButtonProps = props
+      return React.createElement('button', { type: 'button', role: 'menuitem', onClick: props.onSelect }, props.children)
+    }
     return new Proxy(stubs, {
       get(target, prop) {
         if (typeof prop === 'string' && !(prop in target)) {
@@ -185,14 +193,19 @@ function useSessionsService(service) {
  * registered spec's own inject face, so the real `refreshUntilGone` closure takes
  * part instead of a test double. Only `rpc` is always overridden; the remaining
  * overrides exist for the tests that need a different fixture.
+ *
+ * An override patches BOTH the value and the LIVE getter: the inject face
+ * carries `getSessions`/`getWorkspaces` because the renderer caches `inject()`
+ * per entry for the entry's lifetime, and the component prefers the getter —
+ * overriding only the value would be silently ignored.
  */
 async function renderSection(rpc, sessionsOverride, workspacesOverride, extraProps) {
   const base = sectionSpec().inject()
   const props = {
     ...base,
     rpc,
-    ...(sessionsOverride === undefined ? {} : { sessions: sessionsOverride }),
-    ...(workspacesOverride === undefined ? {} : { workspaces: workspacesOverride }),
+    ...(sessionsOverride === undefined ? {} : { sessions: sessionsOverride, getSessions: () => sessionsOverride }),
+    ...(workspacesOverride === undefined ? {} : { workspaces: workspacesOverride, getWorkspaces: () => workspacesOverride }),
     ...(extraProps ?? {}),
   }
   const container = document.createElement('div')
@@ -447,6 +460,192 @@ const rowBoxes = (container) => [...container.querySelectorAll('input[type="chec
 const rowCheckbox = (container, index) => rowBoxes(container)[index]
 const selectAllBox = (container) => [...container.querySelectorAll('input[type="checkbox"]')].find((box) => box.getAttribute('aria-label') === 'selectAll')
 const bulkButton = (container) => [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim().startsWith('deleteSelected'))
+
+// ── the per-row actions, driven through real clicks ─────────────────────────
+//
+// These three paths had NO click coverage: the section's Restore button, its
+// Cancel-deletion button, and the `origin === 'subagent'` row filter were only
+// asserted by reading their presence in the rendered text, so a refactor that
+// wired the wrong handler (or dropped the filter) kept the suite green.
+
+const OK_PING_AND_QUEUE = (sessionIds = [], recoverable = []) => (endpoint) => {
+  if (endpoint === 'ping') return Promise.resolve({ version: '0.2.0', menuDeleteAvailable: true })
+  if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds, recoverable })
+  return new Promise(() => {})
+}
+
+test('the Restore button restores the row and reports it', async () => {
+  const calls = []
+  const base = OK_PING_AND_QUEUE()
+  const rpc = (endpoint, payload) => {
+    calls.push([endpoint, payload?.sessionId])
+    if (endpoint === 'restore') return Promise.resolve({ sessionId: payload.sessionId, restored: true })
+    return base(endpoint)
+  }
+  const { container, cleanup } = await renderSection(rpc)
+  try {
+    const button = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'restore')
+    assert.ok(button, 'the row offers Restore')
+    assert.equal(button.disabled, false, 'and it is enabled')
+    await act(async () => { button.click(); await settle() })
+    assert.deepEqual(calls.filter(([endpoint]) => endpoint === 'restore'), [['restore', ID]], 'the click calls rpc restore with the exact id')
+    assert.ok(container.textContent.includes('restoreOk'), 'the success toast names the key')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a refused Restore reaches the alert region', async () => {
+  const base = OK_PING_AND_QUEUE()
+  const rpc = (endpoint) => {
+    if (endpoint === 'restore') return Promise.reject(Object.assign(new Error('session/not-found'), { code: 'session/not-found' }))
+    return base(endpoint)
+  }
+  const { container, cleanup } = await renderSection(rpc)
+  try {
+    const button = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'restore')
+    await act(async () => { button.click(); await settle() })
+    const alert = container.querySelector('[role="alert"]')
+    assert.ok(alert, 'the failure is surfaced in the alert region')
+    assert.ok(alert.textContent.includes('session/not-found'), 'and it keeps the host code for support')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('the settings Cancel-deletion button cancels the queued deletion', async () => {
+  const calls = []
+  const base = OK_PING_AND_QUEUE([TOMBSTONE], [TOMBSTONE])
+  const rpc = (endpoint, payload) => {
+    calls.push([endpoint, payload?.sessionId])
+    if (endpoint === 'deferred/cancel') return Promise.resolve({ sessionIds: [], reattached: [], warnings: [] })
+    return base(endpoint)
+  }
+  const { container, cleanup } = await renderSection(rpc)
+  try {
+    const button = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim().startsWith('pendingCancel'))
+    assert.ok(button, 'a recoverable entry offers Cancel deletion')
+    await act(async () => { button.click(); await settle() })
+    assert.deepEqual(calls.filter(([endpoint]) => endpoint === 'deferred/cancel'), [['deferred/cancel', TOMBSTONE]], 'the click cancels THAT id')
+    assert.ok(container.textContent.includes('pendingCancelOk'), 'and it confirms')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a cancel that could not restore the workspace slot says so', async () => {
+  // The host restores the slot the delete removed; when it cannot, the session
+  // comes back UNGROUPED — the user must be told, not left to hunt for it.
+  const base = OK_PING_AND_QUEUE([TOMBSTONE], [TOMBSTONE])
+  const rpc = (endpoint) => {
+    if (endpoint === 'deferred/cancel') {
+      return Promise.resolve({ sessionIds: [], reattached: [], warnings: ['workspace "ws-1" no longer exists; the session was restored but not re-grouped'] })
+    }
+    return base(endpoint)
+  }
+  const { container, cleanup } = await renderSection(rpc)
+  try {
+    const button = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim().startsWith('pendingCancel'))
+    await act(async () => { button.click(); await settle() })
+    const alert = container.querySelector('[role="alert"]')
+    assert.ok(alert, 'the host warning is surfaced')
+    assert.ok(alert.textContent.includes('not re-grouped'), 'and it explains what the user will see instead')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a subagent-origin archived row is filtered out of the settings page', async () => {
+  const ID4 = 'session-1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
+  const byId = {
+    [ID]: { displayTitle: 'Alpha', cwd: 'C:/x', updatedAt: 300, running: false },
+    [ID2]: { displayTitle: 'Beta', cwd: 'C:/x', updatedAt: 200, running: false },
+    [ID3]: { displayTitle: 'Gamma', cwd: 'C:/x', updatedAt: 100, running: true },
+    [ID4]: { displayTitle: 'Subagent work', cwd: 'C:/x', updatedAt: 400, running: false, origin: 'subagent' },
+  }
+  const sessions = makeSessionsService({ byId, ids: [ID, ID2, ID3, ID4], phase: 'ready' })
+  const workspaces = guardSurface({
+    list: makeStore({ items: [{ workspaceId: 'w1', title: 'test', path: 'C:/x', sessionIds: [ID, ID2, ID3, ID4] }], archivedSessionIds: [ID, ID2, ID3, ID4] }),
+  }, 'workspaces')
+  const { container, text, cleanup } = await renderSection(OK_PING_AND_QUEUE(), sessions, workspaces)
+  try {
+    assert.ok(text.includes('Alpha'), 'operator rows still render')
+    assert.ok(!text.includes('Subagent work'), 'a subagent-origin row never renders')
+    assert.ok(!container.textContent.includes(ID4), 'and its id is not rendered either')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a row whose title is EMPTY falls back to the placeholder, not a blank line', async () => {
+  // `??` only rejects null/undefined, so an empty displayTitle rendered as a
+  // blank row — indistinguishable from a render failure.
+  const ID_EMPTY = 'session-2b3c4d5e-6f70-4a1b-8c2d-3e4f5a6b7c8d'
+  const sessions = makeSessionsService({
+    byId: {
+      [ID]: { displayTitle: 'Alpha', cwd: 'C:/x', updatedAt: 300, running: false },
+      [ID_EMPTY]: { displayTitle: '', title: '', cwd: 'C:/x', updatedAt: 200, running: false },
+    },
+    ids: [ID, ID_EMPTY],
+    phase: 'ready',
+  })
+  const workspaces = guardSurface({
+    list: makeStore({ items: [{ workspaceId: 'w1', title: 'test', path: 'C:/x', sessionIds: [ID, ID_EMPTY] }], archivedSessionIds: [ID, ID_EMPTY] }),
+  }, 'workspaces')
+  const { text, cleanup } = await renderSection(OK_PING_AND_QUEUE(), sessions, workspaces)
+  try {
+    assert.ok(text.includes('Alpha'), 'a titled row still shows its title')
+    assert.ok(text.includes('unknownSession'), 'an empty title renders the placeholder instead of nothing')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a toast timer is pruned when it fires', async (t) => {
+  // `toastTimers` is only ever cleared wholesale on unmount, so without pruning a
+  // long-lived page accumulates one dead handle per toast, forever.
+  //
+  // The mock clock is enabled AFTER the mount on purpose: `renderSection`'s
+  // macrotask flush (and `settle`) use a REAL setTimeout, so trapping timers
+  // first would hang the mount.
+  const base = OK_PING_AND_QUEUE([TOMBSTONE], [TOMBSTONE])
+  const rpc = (endpoint) => (endpoint === 'deferred/cancel'
+    ? Promise.resolve({ sessionIds: [], reattached: [], warnings: [] })
+    : base(endpoint))
+  const { container, cleanup } = await renderSection(rpc)
+
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const scheduled = []
+  const originalSet = globalThis.setTimeout
+  const originalClear = globalThis.clearTimeout
+  const cleared = []
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    const handle = originalSet(fn, ms, ...rest)
+    scheduled.push({ handle, ms })
+    return handle
+  }
+  globalThis.clearTimeout = (handle) => {
+    cleared.push(handle)
+    return originalClear(handle)
+  }
+  const flushImmediate = () => new Promise((resolve) => setImmediate(resolve))
+  try {
+    const button = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim().startsWith('pendingCancel'))
+    await act(async () => { button.click(); await flushImmediate() })
+    assert.ok(container.textContent.includes('pendingCancelOk'), 'a toast was raised')
+    const toastTimer = scheduled.find((entry) => entry.ms === 5000)
+    assert.ok(toastTimer, 'and it scheduled its own 5s dismissal')
+
+    // Everything scheduled has now fired (the toast plus the 800ms spinner).
+    t.mock.timers.tick(6000)
+    await act(async () => { await flushImmediate() })
+    await cleanup()
+    assert.ok(!cleared.includes(toastTimer.handle), 'a FIRED timer is gone from the list, so unmount does not clear a dead handle')
+  } finally {
+    globalThis.setTimeout = originalSet
+    globalThis.clearTimeout = originalClear
+  }
+})
 const idleRpc = (calls, extra) => (endpoint, payload) => {
   calls.push([endpoint, payload && payload.sessionId])
   if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
@@ -605,8 +804,10 @@ async function renderMenuItem(options = {}) {
   const {
     rpc, menuEnabled = true, displayTitle = 'Hello world', sessionId = ID,
     refreshAfterDelete = async () => true, onError, translate,
+    getMenuEnabled, requestMenuPing,
   } = options
   clearToasts()
+  lastMenuButtonProps = null
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
@@ -622,6 +823,8 @@ async function renderMenuItem(options = {}) {
     refreshAfterDelete,
     menuEnabled,
     onError,
+    ...(getMenuEnabled === undefined ? {} : { getMenuEnabled }),
+    ...(requestMenuPing === undefined ? {} : { requestMenuPing }),
   }
   await act(async () => { root.render(React.createElement(menuItem(), props)) })
   await act(async () => { await settle() })
@@ -644,6 +847,23 @@ async function renderMenuItem(options = {}) {
     },
   }
 }
+
+test('the menu row asks the official primitive for the danger styling', async () => {
+  // `danger` / `separatorBefore` / the icon are invisible in a text snapshot, so
+  // before the stub recorded them the README's promise ("native danger colors,
+  // separator, keyboard behaviour from the menu itself") was asserted only by a
+  // manual e2e run — dropping any of them kept this suite green.
+  const item = await renderMenuItem({ menuEnabled: true })
+  try {
+    assert.ok(lastMenuButtonProps, 'MenuItemButton was rendered')
+    assert.equal(lastMenuButtonProps.danger, true, 'the row asks for the danger colour')
+    assert.equal(lastMenuButtonProps.separatorBefore, true, 'and for the separator above it')
+    assert.ok(lastMenuButtonProps.icon, 'and it carries an icon')
+    assert.equal(lastMenuButtonProps.icon.props.size, 14, 'at the size the shipped rows use')
+  } finally {
+    await item.cleanup()
+  }
+})
 
 test('menu item registers into the official session-menu slot at order 500', () => {
   const spec = menuSpec()
@@ -986,6 +1206,89 @@ test('the menu ping gives up after the retries and keeps the row hidden', async 
   await flush()
   assert.equal(attempts, 3, 'three attempts in total, then it stops')
   assert.equal(dead.menuSpec().inject().menuEnabled, false, 'an unconfirmed row stays hidden instead of appearing anyway')
+})
+
+test('a failed boot ping is retried when the menu is next opened, and the row recovers', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let up = false
+  const attempts = []
+  const pings = () => attempts.filter((method) => method === 'session-manager/ping').length
+  const dead = makeCtx({
+    sessions: undefined,
+    workspaces: undefined,
+    remote: undefined,
+    connection: { rpc: { call: async (_channel, method) => {
+      attempts.push(method)
+      if (method !== 'session-manager/ping') return { ok: true, value: {} }
+      if (!up) throw new Error('down')
+      return OK_PING
+    } } },
+  })
+  mod.apply(dead.ctx)
+  await flush()
+  t.mock.timers.tick(1000)
+  await flush()
+  t.mock.timers.tick(3000)
+  await flush()
+  const spec = dead.menuSpec().inject()
+  assert.equal(pings(), 3, 'three attempts, then it stops')
+  assert.equal(spec.getMenuEnabled(), false, 'the live answer is "hidden" while the host is down')
+
+  // The host comes back. Opening the menu re-arms exactly one ping, and the
+  // LIVE answer flips — the frozen `menuEnabled` value never would have.
+  up = true
+  spec.requestMenuPing()
+  await flush()
+  assert.equal(pings(), 4, 'the menu open re-armed one ping')
+  assert.equal(spec.getMenuEnabled(), true, 'and the row can appear on the next open')
+})
+
+test('a host that answered "no" is never re-pinged (an answer is not a failure)', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let pings = 0
+  const dead = makeCtx({
+    sessions: undefined,
+    workspaces: undefined,
+    remote: undefined,
+    connection: { rpc: { call: async (_channel, method) => {
+      if (method !== 'session-manager/ping') return { ok: true, value: {} }
+      pings += 1
+      return { ok: true, value: { menuDeleteAvailable: false } }
+    } } },
+  })
+  mod.apply(dead.ctx)
+  await flush()
+  const spec = dead.menuSpec().inject()
+  assert.equal(spec.menuEnabled, false, 'the host said no')
+  spec.requestMenuPing()
+  await flush()
+  assert.equal(pings, 1, 're-pinging on every menu open would be one request per open, forever')
+})
+
+test('the menu row reads the live ping answer, not the frozen inject value', async () => {
+  // The renderer caches inject() per entry for the entry's lifetime, so a plain
+  // `menuEnabled` captured while the ping was still in flight stayed `null` for
+  // the whole page. The component reads the getter and asks for another ping.
+  let enabled = null
+  const requested = []
+  const first = await renderMenuItem({
+    menuEnabled: null, // the FROZEN value: stale forever
+    getMenuEnabled: () => enabled,
+    requestMenuPing: () => requested.push('ping'),
+  })
+  try {
+    assert.equal(first.item(), null, 'hidden while the answer is unknown')
+    assert.deepEqual(requested, ['ping'], 'opening the menu re-arms a ping instead of waiting for a reload')
+    enabled = true // the host answered in the meantime
+    const second = await renderMenuItem({ menuEnabled: null, getMenuEnabled: () => enabled })
+    try {
+      assert.ok(second.item(), 'the NEXT open shows the row even though the injected value is still the frozen null')
+    } finally {
+      await second.cleanup()
+    }
+  } finally {
+    await first.cleanup()
+  }
 })
 
 test('a burst of api-session/removed events collapses into one pull', async (t) => {

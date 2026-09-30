@@ -71,7 +71,7 @@ item appears (native danger styling, same confirm dialog).
 | --- | --- |
 | `session_list_archived` | List archived sessions as JSON |
 | `session_restore_archived` | Restore by id (reversible, no confirmation) |
-| `session_delete_permanently` | Delete by id; **requires `confirm: true`**; refuses running sessions |
+| `session_delete_permanently` | Delete an **archived** session by id; **requires `confirm: true`**; refuses unknown ids, ids that are not archived, and sessions with a running task |
 
 ## Install
 
@@ -88,8 +88,16 @@ dsh plugin --profile <name> add "file:/path/to/dsh-session-manager"
 
 `dsh plugin add` installs through pnpm and appends the package to
 `dsh.profile.bundles`; this package's `cordis.patch.yml` bundle layer mounts
-the plugin row automatically. **Restart the dsh desktop app afterwards**
-(new bundles are not hot-loaded).
+the plugin row automatically. If the plugin does not show up after a page
+reload, restart the dsh desktop app (a live profile rebuilds most patches on
+reload, but a newly added bundle is not guaranteed to be picked up).
+
+> ⚠ **Do not install this by the bare npm name.** The npm package
+> `dsh-session-manager` is a **different, unrelated project**
+> ([hkkz9522/dsh-session-manager](https://github.com/hkkz9522/dsh-session-manager),
+> published 0.5.x, another maintainer) which also registers a session menu row —
+> so installing the wrong one looks like it worked. Install from this repository,
+> by path as above.
 
 Alternatively mount it manually in the profile's `cordis.patch.yml` (the
 bundle channel above is easier):
@@ -110,7 +118,9 @@ Deleting runs in this order:
    check; malformed ids read back from that queue file are pattern-validated
    before any filesystem use.
 2. **Registry bookkeeping (durable + broadcast)**: detaches the id from
-   its workspace's `sessionIds` and removes it from the global archive set.
+   its workspace's `sessionIds` and — for a **cold** session — removes it from
+   the global archive set. (An **open** session deliberately keeps/adds the id
+   there instead: that is the tombstone, see below.)
    The detach does not trust the workspace's filtered `sessionIds` view alone —
    a stale registry header index can hide the id from that getter (which used
    to let deleted sessions survive, resurfacing as *ungrouped* entries), so
@@ -174,7 +184,7 @@ attachments are content-addressed and intentionally kept.
   failure leaves the entry fully retryable; an unreadable queue touches
   nothing). Entries whose files are already gone (the normal open-session
   delete) have nothing left to act on, so they collapse into a single
-  "already deleted · clears after restart" summary line with an optional
+  "Deleted · cleaned up automatically after restart" summary line with an optional
   expander for their ids instead of occupying the banner — and canceling one
   is refused by the host too (`session/data-gone`), not just hidden by the UI.
 - **An unreadable queue refuses instead of guessing**: the pending-delete queue
@@ -211,6 +221,11 @@ pnpm install
 pnpm test   # syntax check + host unit tests + client render smoke tests
 ```
 
+**Development needs Node ≥ 22.22.2** — the render suite mounts React inside
+jsdom, and jsdom 30 declares `^22.22.2 || ^24.15.0 || >=26`. The plugin itself
+runs on Node ≥ 20 (`engines.node`), so a host on 20 is fine; only the test
+suite needs the newer runtime.
+
 The render tests mount the real client settings section with React inside
 jsdom (`test/client.render.test.mjs`) — they catch UI crashes the host tests
 cannot see.
@@ -243,6 +258,14 @@ second positional) is now required, and the home must carry the marker
 `scripts/e2e-seed.mjs` writes. Without it — or when it names the real `~/.dsh` —
 the script refuses to run, because a URL alone cannot prove which home the
 instance behind it serves (see `scripts/e2e-guard.mjs`).
+
+The remaining scripts are diagnostics, not acceptance tests:
+`e2e-bug2.mjs` and `e2e-live.mjs` reproduce fixed field bugs (both delete, both
+guarded), `e2e-realclick.mjs` and `e2e-probe.mjs` are one-off DOM
+reconnaissance, and only `e2e-residue.mjs`, `e2e-dialog-style.mjs`,
+`e2e-realclick.mjs` and the guard itself can FAIL — the rest print a transcript
+and exit 0 whatever happened, so read their output rather than their exit code.
+Set `CHROME_PATH` if your Chrome is not at the hard-coded default path.
 
 ## References
 

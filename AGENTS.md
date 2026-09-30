@@ -64,15 +64,33 @@ pnpm test   # node --check on both libs + host + client render + contract tests
   `DSH_HOME` happens to be set). Keep every fs-touching test behind
   `makeFixture()`.
 - E2E (`scripts/e2e-*.mjs`) drives a real web instance through puppeteer-core
-  with Chrome hard-coded at `C:/Program Files/Google/Chrome/Application/chrome.exe`.
+  with Chrome resolved as `process.env.CHROME_PATH ?? C:/Program Files/Google/Chrome/Application/chrome.exe`
+  (set `CHROME_PATH` on a machine whose Chrome lives elsewhere, or on macOS/Linux).
   It must run against an isolated home seeded by `scripts/e2e-seed.mjs`, never
-  against the real `~/.dsh`. The two **destructive** scripts
-  (`e2e-mutations.mjs`, `e2e-residue.mjs`) enforce that instead of trusting the
-  operator: they require the seeded home (positional for mutations, `--home
-  <path>` for residue) and refuse without the `.session-manager-e2e` marker the
-  seed writes — including an explicit refusal for the real home, because a URL
-  alone cannot prove which home an instance serves (`scripts/e2e-guard.mjs`).
-  Keep that guard on any new destructive script.
+  against the real `~/.dsh`. **Every** script that deletes or mutates sessions
+  enforces that instead of trusting the operator, and the set is larger than it
+  used to be: `e2e-mutations.mjs`, `e2e-residue.mjs`, `e2e-bug2.mjs` and
+  `e2e-live.mjs` really delete (their confirm click is unconditional), and
+  `e2e-dialog-style.mjs` mutates the archive set on its fallback path. Each
+  requires the seeded home (positional for mutations/bug2/live/dialog-style,
+  `--home <path>` for residue) and refuses without the `.session-manager-e2e`
+  marker the seed writes — including an explicit refusal for the real home,
+  because a URL alone cannot prove which home an instance serves
+  (`scripts/e2e-guard.mjs`).
+  ⚠ **`e2e-seed.mjs` is itself destructive**: it `rm -rf`s the target's
+  `sessions/` and `storages/`, and copies your real `.credentials.yaml` in. It
+  must therefore validate FIRST, before any delete — the real home is refused,
+  and any other target must be either already marked or EMPTY. Never move that
+  check below the first `rm`: a guard that runs after the delete is not a guard.
+  Keep the guard on any new destructive script.
+  ℹ **Assertion status — do not mistake a transcript for a test.** Only
+  `e2e-residue.mjs`, `e2e-dialog-style.mjs`, `e2e-realclick.mjs` and the guard
+  itself can FAIL. `e2e-check.mjs`, `e2e-mutations.mjs`, `e2e-bug2.mjs`,
+  `e2e-live.mjs` and `e2e-probe.mjs` print a transcript and exit 0 whatever
+  happened: read their output, never their exit code. `e2e-bug2.mjs` reproduces
+  a fixed field bug (superseded by `e2e-residue.mjs`) and `e2e-probe.mjs` is
+  one-off DOM reconnaissance — both are kept as diagnostics, not as acceptance
+  tests.
   ⚠ **The desktop `dsh.cmd` shim hardcodes
   `set "DSH_HOME=<real home>"`**, so `DSH_HOME=<e2e-home> dsh ...` does NOT
   isolate — verified: `dsh plugin add` under that env created the profile in
@@ -85,14 +103,33 @@ pnpm test   # node --check on both libs + host + client render + contract tests
 
 ## Architecture
 
-Two runtime halves plus a bundle patch (`cordis.patch.yml` merely inserts the
-plugin row; `dsh plugin add` applies it):
+Two runtime halves, three **pure** modules they share, plus a bundle patch
+(`cordis.patch.yml` merely inserts the plugin row; `dsh plugin add` applies it):
+
+- **`lib/pending-queue.js`**, **`lib/session-summaries.js`** and
+  **`lib/artifact-paths.js` — the pure halves.** No `ctx`: the pending queue's
+  format / versioning / input sanitization, the controller-list envelope + row
+  projection, and the three-seam artifact resolution (that one takes its seams
+  INJECTED, so it is still host-free). They exist so the seams whose SILENT
+  failure actually reached users are unit-testable without standing up a host
+  (`test/pending-queue.test.mjs`, `test/session-summaries.test.mjs`,
+  `test/artifact-paths.test.mjs`). Keep them host-free — the moment one needs
+  `ctx`, the extraction has lost its point. Their semantics are load-bearing: a
+  malformed id that reaches the filesystem turns the raw sessions-root scan into
+  a path-traversal delete, a torn queue file must be `degraded` rather than
+  empty, a missed artifact resurrects a deleted session, and a controller row's
+  title is a PROJECTION (see the gotcha below).
+  ⚠ A new runtime file must be added to BOTH `package.json → files` (or the
+  published package is broken) AND `package.json → scripts.test` when it brings a
+  suite (or that suite never runs, locally or in CI).
 
 - **`lib/index.js` — host (Node, Cordis plugin)**. `apply(ctx, config)` mounts:
   one **exact fetch route per endpoint** on the connection service
   (`connection.fetch.register({ path: `${CHANNEL}/${endpoint}`, methods:
   ['POST'], requestBody: 'buffered', fetch })` — the shape the official
   dsh-session-log-export uses) and agent tools (`tools.register`).
+  It imports the three pure modules above and keeps only the ctx-bound parts:
+  the manager closure, the operation lock, the RPC handler and `apply`.
   ⚠ 0.1.5-rc host compatibility, three traps in one place — keep all three
   invariants or the whole surface silently dies:
   1. **Never call `connection.rpc.intercept('/api', …)`.** That channel holds
@@ -139,46 +176,44 @@ plugin row; `dsh plugin add` applies it):
   data from the sessions/workspaces client stores) and the session context-menu
   row (`ctx.slots.inject('sidebar.workspaces.session.menu.item')`, order 500,
   rendered with the official `MenuItemButton`).
-  ⚠ **Never identify an official surface by its text or DOM shape.** The menu
-  row used to be injected by observing the DOM and resolving the session
-  through the React fiber tree, with `Set(['归档会话','Archive session'])`
-  matching each menu item's `textContent`. dsh 0.1.7-rc.2 appended the
-  keyboard-shortcut hint to every row's text (`归档会话` became
-  `归档会话Ctrl+Alt+A`), the match stopped matching, and the red delete row
-  vanished from the menu — with **no error at all**: the client module loaded,
-  the roster listed it, the settings page was healthy, and the augmentation
-  even logged that it was active. The official slot has existed since
-  0.1.7-alpha.1 and hands the row identity over as props; use it.
-  ⚠ **`DeleteSessionMenuItem` must call `props.useMenuOpenState()`
-  unconditionally, before its `menuEnabled` early return.** Reordering those
-  two lines crashes the slot entry with a hook-order error.
+  ⚠ **Never identify an official surface by its text or DOM shape.** The row is
+  an ordinary entry in `sidebar.workspaces.session.menu.item`, which hands the
+  row identity over as props — that IS the contract. A DOM/text match is not one:
+  dsh 0.1.7-rc.2 appending a shortcut hint to every row's text
+  (`归档会话` → `归档会话Ctrl+Alt+A`) made the match stop matching, and the row
+  vanished with **no error at all** (module loaded, roster listed it, settings
+  healthy, the augmentation even logged itself active). See README.md's
+  "Session context menu" note.
+  ⚠ **`DeleteSessionMenuItem` calls `props.useMenuOpenState()`
+  unconditionally, before its `menuEnabled` early return.** Keep it that way —
+  but the recorded reason was WRONG and is corrected here against 0.2.0-rc.2:
+  the installed hook is `menuOpenStateFactory = (_standard, state) => () => state`
+  (`dsh-client-ui-workspace/lib/client.js`), a plain closure that calls NO React
+  hook, so reordering those two lines would NOT throw a hook-order error today.
+  The order is retained as defensive convention (an upstream refactor could make
+  it a real hook at any time), not because it currently crashes.
   ⚠ **Every symbol this half pulls out of an official client module is a hard
   upgrade dependency, and a renamed one arrives as `undefined`, not an error.**
-  dsh 0.1.7 dropped the artboard-suffixed product icons (`IconArchiveOutline20`,
-  `IconTrashOutline16`, …) for size-neutral names: `Regular` keeps the one-pixel
-  artwork at the glyph's own default size, `Medium` is the same geometry at a
-  1.3px stroke, and the `size` prop picks rendered dimensions. The destructure
-  went on yielding `undefined`, so `React.createElement(undefined, …)` threw
-  React error #130 (`slot entry crashed in 'settings.section'`) and the WHOLE
-  settings pane rendered blank while the nav entry, the host RPC and the
-  context menu all stayed healthy — the client module still loaded, so the
-  module roster looked fine. `test/client.render.test.mjs` stubs this module,
-  which is why its green tests could not see it; the stub is now a Proxy
-  that throws on any name outside `PRIMITIVE_NAMES` (which includes
-  `MenuItemButton`), turning the next rename into a loud failure. When dsh is
-  upgraded, re-check these names against the installed
-  `@deepseek-ai/dsh-client-ui-primitives`.
-  The same class of blind spot hid the rc.2 menu break: the DOM augmentation
-  had **zero** tests. The slot registration is a plain component, so it is
-  covered — keep it that way.
-  The third instance was the refresh seam: `lib/client.js` called
-  `sessions.refreshList()` for three releases, a name no published client service
-  carries (0.1.5-rc.1, 0.1.7-alpha.1, 0.1.7-rc.1 and 0.1.7-rc.2 all expose only
-  `refresh()`), so every guard skipped and a SUCCESSFUL cold delete reported a
-  failed refresh. `ctx.get('sessions')` hands out the SERVICE, never its internal
-  manager: pull through the module-level `refreshSessionList(sessions)` helper and
-  read the store via `sessions.list`. Never invent a method name on an official
-  service — the fakes and `test/contract.test.mjs` now fail loudly instead.
+  That is exactly how dsh 0.1.7's size-neutral icon rename
+  (`IconArchiveOutline20` → `IconArchiveOutlineRegular`) threw React error #130
+  and blanked the settings SECTION while the nav, the host RPC and the menu all
+  stayed healthy — the client module still loaded, so the roster looked fine (a
+  renamed SLOT name is even quieter: the surface simply never mounts). Guards, in
+  order of who catches what: `test/client.render.test.mjs`'s Proxy throws on any
+  name outside its hand-maintained `PRIMITIVE_NAMES` (client.js ADDING a name),
+  and `test/contract.test.mjs`'s installed-module predicates
+  (`assertPrimitivesExports`, `assertSlotsDeclared`,
+  `assertControllerListShape`, `assertTitleProjection`) catch an UPSTREAM rename.
+  When dsh is upgraded, run the contract suite — it is the machine-checked form
+  of the old "re-check these names by hand" ritual.
+  Two more members of this class, both now covered: the DOM augmentation above
+  had **zero** tests, and `lib/client.js` called `sessions.refreshList()` for
+  three releases while every published client service carries only `refresh()`,
+  so a SUCCESSFUL cold delete reported a failed refresh. `ctx.get('sessions')`
+  hands out the SERVICE, never its internal manager: pull through the module-level
+  `refreshSessionList(sessions)` helper and read the store via `sessions.list`.
+  Never invent a method name on an official service — the Proxy-guarded fakes and
+  the contract suite now fail loudly instead.
 - **A slot registrant's `inject()` runs ONCE per entry and its result is cached
   for that entry's lifetime** (`dsh-client-ui-renderer`: `cachedRootInject` is a
   WeakMap keyed by the entry, with no invalidation; session-scoped entries cache
@@ -226,7 +261,28 @@ plugin row; `dsh plugin add` applies it):
   `collectSummaries` fallback) unwrap `.header`, skip — and warn once about — an
   entry without one, and `test/contract.test.mjs` pins the wrapper against the
   installed backend with three inline fixtures.
-- **One corpus read per operation** (`artifactIndex`): `sessionPersistence.list()`
+  ⚠ **The PRIMARY seam has the same shape trap and it bit harder**:
+  `sessionController.list()` answers `{ items: [...] }`, never a bare array, and
+  its rows carry NO `title` and NO `createdAt` — `listFields()` adds only
+  `cwd`/`origin`/`parentSessionId`. The display title is the `title` PROJECTION
+  (`item.projections.values.title`), which is also where the official browser
+  client reads it (`projectionValues?.title`). `collectSummaries()` used to
+  require `Array.isArray(items)` and `return` immediately, so on a real host the
+  map was always EMPTY and both the `list` endpoint and the
+  `session_list_archived` tool reported `title: ''`/`(untitled)`, `cwd: null`,
+  `updatedAt: null` for every archived session — silently, because the host
+  test's fake returned exactly that invented flat-array `{ title }` shape. It
+  now accepts BOTH shapes, reads the title from the projection, falls through to
+  the persistence listing when the controller answers nothing usable, and warns
+  once (`ctx.logger`) on an unrecognized shape instead of reporting an empty
+  corpus. Keep all four; the fixture in `test/host.test.mjs` encodes the real
+  shape on purpose, and `test/contract.test.mjs` now pins all three upstream
+  facts — `assertControllerListShape` (the `{ items }` envelope, the
+  `listState.list` delegation, the projections bag on each row) and
+  `assertTitleProjection` (the `title` projection key) — against the installed
+  modules.
+- **One corpus read per operation** (`artifactIndex`, now
+  `createArtifactResolver().index` in `lib/artifact-paths.js`): `sessionPersistence.list()`
   walks every generation and reads+decompresses every stored header, so resolving
   ONE queued id at a time made `deferred/list` `O(queued × corpus)` — twice over
   (the sweep and the `recoverable` split), while holding the operation lock.
@@ -296,21 +352,12 @@ plugin row; `dsh plugin add` applies it):
      `seedPendingQueue` retries a failed seed with the ping's own 1s/3s backoff,
      then gives up with one `console.warn` — keep it retried, and keep the
      pending-seed timer in the teardown disposer.
-  Regression cover: `test/host.test.mjs` ("deferred/list can re-announce…",
-  "the persistence header listing alone…", "the persistence header listing is a
-  real fallback…", "a symlinked project directory…", "deferred/list reads the
-  persistence listing once…"), `test/client.render.test.mjs` ("a removal event
-  for a queued id…", "a removal event that outruns its own delete response…",
-  "a failed first queue read does not disarm the residue repair", "a bulk run
-  made only of open deletes…", "a mixed bulk run does not re-pull…", "an
-  explicit list pull re-checks the residue even when the store cannot be
-  watched", "teardown closes an open dialog…", "a dialog that cannot be
-  attached resolves as cancelled…", "a failed pending-queue read is reported…",
-  "host warnings and a failed refresh both reach the user", "the unreachable-host
-  guidance appears when the ping fails", "the dialog describes itself…", "two
-  pending-cancel buttons are distinguishable by name") and
-  `scripts/e2e-residue.mjs` (real Chrome: after a menu delete of an open session
-  the id renders in NEITHER view).
+  Regression cover: the residue rules are pinned in `test/host.test.mjs` (queue
+  reads, re-announce, sweep) and `test/client.render.test.mjs` (removal events,
+  the schedule/fire guard, the seed retry, the banner split, the dialog), with
+  `scripts/e2e-residue.mjs` as the real-Chrome acceptance (`grep -n "residue"` in
+  both suites lists the cases; the test names are the contract, so do not rename
+  one without updating the behaviour it claims).
 - **Open (live-idle) sessions delete immediately, via a tombstone**: dsh has no
   public "close session" API — the in-memory summary outlives the delete (its
   owner scope is the session-controller service scope, not the UI view), but
@@ -357,6 +404,27 @@ plugin row; `dsh plugin add` applies it):
   `finishDeferredDeletion`) use the `_addPending`/`_removePending` internals,
   never the public lock-taking wrappers. The queue READ is lock-free by design
   (atomic-rename writes; callers only ever want a snapshot).
+  ⚠ **That lock only serializes THIS plugin.** Archive-set writes must therefore
+  go through the registry's OWN serialized entry points —
+  `unarchiveThrough(reg, id)` / `archiveThrough(reg, id)` prefer
+  `reg.unarchiveSession(id)` and `reg.archiveSession(id, { stopActivity: true })`
+  and fall back to a `setState` spread only when they are absent. `setState` is a
+  bare `global.set` in `dsh-workspace`, while every official mutation (archive,
+  unarchive, pin, workspace create) runs on the registry's internal
+  `enqueueOperation` queue: a hand-rolled read-modify-write lets our stale
+  snapshot undo a concurrent official write, restoring the `pinnedSessionIds` /
+  `defaultWorkspaceId` / `workspaceIds` we read a moment earlier. Official calls
+  are also no-op-safe, and `archiveSession` drops the id from the PIN set (a
+  hand-rolled add leaves it dangling). `stopActivity: true` is REQUIRED: without
+  it `archiveSession` throws for running work, which would break
+  `allowDeleteRunning` after it had already decided to proceed.
+  ⚠ **A registry we cannot write safely is refused BEFORE anything is touched**
+  (`assertRegistryWritable`, called at the top of `deleteLocked`, `restoreLocked`,
+  `cancelPending` and `finishDeferredDeletion`): a registry exposing neither
+  `requireState` nor the official pair has no faithful state to spread, and a
+  refusal raised after the detach would strand the session (detached, still
+  archived, no marker). `registryState()`'s reconstruction is marked
+  `reconstructed: true` and reads only.
 - **An unreadable pending-delete queue is REFUSED, never reported as empty.**
   `readPendingSnapshot()` separates the two cases: ENOENT is the normal empty
   queue, while a read failure or unparseable JSON (a torn file counts — the
@@ -386,14 +454,31 @@ plugin row; `dsh plugin add` applies it):
   promise, never a sync throw. `readPending` additionally validates on the
   way IN (queue file is an input channel: crash leftovers, hand edits,
   corruption). Keep both guards.
+  ⚠ **The agent tool gates in front of the manager, in this order:** validate
+  through `manager.assertSessionId` FIRST (a malformed id must always answer
+  `bad-request` and never be masked into not-found/not-archived by the gates),
+  then `manager.sessionKnown` → `session/not-found`, then `manager.isArchived`
+  → `session/not-archived`. The archived gate is deliberate and does NOT apply
+  to the human surfaces: the context-menu row is offered on every session row
+  (documented feature), the settings page lists archived rows. It exists because
+  the tool is model-facing and only the model could know an id it was never
+  asked about. `isArchived`/`sessionKnown` are cheap registry reads (no corpus
+  walk) and return `false` on a registry failure — a gate may only refuse,
+  never widen access.
 - **Version is single-sourced**: the RPC `ping` response reports
   `pluginVersion()`, which reads `package.json` at runtime; the
   `VERSION_FALLBACK` literal in `lib/index.js` is only a corrupt-manifest
   safety net. Bumping `package.json` is enough (a host test asserts the match).
 - `package.json → files` is a whitelist; new runtime files must be added there.
-- Config: schema in `lib/index.js` (`Config`); `effectiveConfig()` merges
-  per-user overrides from the settings document under namespace
-  `dsh-session-manager` on top of composition config.
+- Config: schema in `lib/index.js` (`Config`); the supported channel is the
+  COMPOSITION config (the profile entry's `config:`), which the Loader resolves
+  into `apply(ctx, config)`. `effectiveConfig()` also merges per-user overrides
+  read as `ctx.get('settings')?.get?.('dsh-session-manager')` — **that path is
+  inert today**: the installed settings service (`SettingsForms`) exposes
+  `configure`/`describe`/`update`/`documentPath`/… and **no `get`**, so the read
+  yields nothing and the `sessionListLimit` clamp is the only thing that ever
+  exercises the merge. It is kept as a forward-compatible seam — do not document
+  it as a working feature, and do not "fix" it by inventing a settings method.
 - Client UI strings live in the inline `zh`/`en` locale dictionaries in
   `lib/client.js` — always add a key to **both**. Styling goes through the
   `TOKENS` map (dsw CSS variables with hardcoded fallbacks); the confirm dialog
@@ -403,9 +488,15 @@ plugin row; `dsh plugin add` applies it):
   `aria-labelledby` id (a fixed id would resolve to whichever overlay came
   first), and hands focus back to the element that opened it on close — the menu
   path's opener is unmounted by then, hence the `document.contains` check.
-  ⚠ **The card must use the OPAQUE modal tokens, never the menu surface.**
-  `--dsw-specific-menu` resolves to a ~94%-alpha popover fill (field report:
-  the dialog read as see-through over the page). Mirror the official modal
+  ⚠ **Every card, row and toast must use the OPAQUE modal tokens, never the
+  menu surface.** Measured on Windows: `--dsw-specific-menu` →
+  `--dsw-menu-surface-fill` = `#f8f9fa94` (58% opaque) in light and `#43454a73`
+  (45%) in dark; the ~94% figure is a `html[data-platform=darwin]` override
+  only, so the previous "~94%-alpha" note understated the problem (field report:
+  the dialog read as see-through). None of this plugin's surfaces is a popover
+  inside the official menu, so that token is not used at all now, and its
+  companion `--dsw-menu-backdrop-filter` was never applied anyway. Mirror the
+  official modal
   instead (`dsh-client-ui-primitives Modal.module.css` / `Button.module.css`):
   card = `--dsw-alias-bg-layer-2` + `--dsw-radius-panel` (28px) +
   `--dsw-elevation-prominent`; mask = `--dsw-alias-bg-mask-1` +
@@ -438,6 +529,7 @@ plugin row; `dsh plugin add` applies it):
 
 ## Reference docs
 
-`README.md` / `README.zh.md` document the delete semantics, config fields and
-dsh integration (bundle patch, client inject list) — read the "Delete
-semantics" section before touching `deleteSession`/`sweepPending`.
+`README.md` / `README.zh.md` document the delete semantics and config fields;
+the client injection list lives in `package.json → dsh.client.inject` (the
+READMEs do not carry it). Read the "Delete semantics" section before touching
+`deleteSession`/`sweepPending`.

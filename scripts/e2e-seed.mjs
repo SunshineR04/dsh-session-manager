@@ -7,18 +7,39 @@
 // (gitignored; see `e2e-seed.local.example.json` for the shape) so no real
 // paths or session ids end up in the repository.
 // Run: node scripts/e2e-seed.mjs <e2e-home> [<source-dsh-home>]
-import { mkdir, cp, rm, writeFile, readFile } from 'node:fs/promises'
+import { mkdir, cp, rm, writeFile, readFile, readdir } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { E2E_MARKER } from './e2e-guard.mjs'
+import { E2E_MARKER, assertDisposableHome } from './e2e-guard.mjs'
 
 const e2eHome = process.argv[2]
 const sourceHome = process.argv[3] ?? join(homedir(), '.dsh')
 if (!e2eHome) {
   console.error('usage: node scripts/e2e-seed.mjs <e2e-home> [<source-dsh-home>]')
   process.exit(2)
+}
+
+// THIS SCRIPT IS DESTRUCTIVE: it recursively removes `sessions/` and
+// `storages/` in the target. The real home is refused by name, and anything
+// else must be either already seeded (marker) or EMPTY — so a typo cannot wipe
+// an unrelated tree either. Both checks run BEFORE the first `rm`, because a
+// guard that runs after the delete is not a guard.
+try {
+  assertDisposableHome(e2eHome, { script: 'e2e-seed', allowUnseeded: true })
+} catch (error) {
+  console.error(error.message)
+  process.exit(2)
+}
+if (!existsSync(join(e2eHome, E2E_MARKER))) {
+  const existing = existsSync(e2eHome) ? await readdir(e2eHome) : []
+  if (existing.length > 0) {
+    console.error(`e2e-seed: refusing to seed into ${e2eHome}: it exists, carries no ${E2E_MARKER} and is not empty (${existing.length} entries).`)
+    console.error('e2e-seed: point it at a NEW or emptied directory — never a home you care about.')
+    process.exit(2)
+  }
 }
 
 const specPath = join(dirname(fileURLToPath(import.meta.url)), 'e2e-seed.local.json')
@@ -41,9 +62,15 @@ await mkdir(join(e2eHome, 'storages', 'session_projcache', 'sessions'), { recurs
 await mkdir(join(e2eHome, 'profiles'), { recursive: true })
 
 // Settings + credentials copies give the test app the user's providers/theme.
+// ⚠ `.credentials.yaml` is a REAL secret copy: it must land in the disposable
+// home for the test app to reach the model provider, so delete that home when
+// you are done with it (the marker file makes it obvious which tree that is).
 for (const name of ['settings.yaml', '.credentials.yaml']) {
   try {
     await cp(join(sourceHome, name), join(e2eHome, name))
+    if (name === '.credentials.yaml') {
+      console.warn(`e2e-seed: copied your real .credentials.yaml into ${join(e2eHome, name)} — delete this home when finished`)
+    }
   } catch {
     console.warn(`e2e-seed: no ${name} in ${sourceHome}`)
   }

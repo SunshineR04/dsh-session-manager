@@ -73,16 +73,27 @@ test('the endpoints no behaviour test exercises are still called by the client',
 // upgrade guard. When dsh is upgraded on a dev machine, a renamed export or a
 // moved method fails here before it reaches a user.
 
-const installedClientModule = () => {
-  const override = process.env.DSH_CLIENT_MODULE
-  const candidates = [
-    ...(override === undefined ? [] : [override]),
-    join(here, '..', 'node_modules', '@deepseek-ai', 'dsh-api-session-controller', 'lib', 'client.js'),
-    join(homedir(), '.dsh', 'profiles', 'node_modules', '@deepseek-ai', 'dsh-api-session-controller', 'lib', 'client.js'),
-    join(homedir(), 'AppData', 'Roaming', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-api-session-controller', 'lib', 'client.js'),
+/**
+ * Resolve a file inside an INSTALLED dsh package. Three roots, in order: this
+ * repo's own node_modules, the dsh profile install, and the npm-global dsh.
+ * They are not equivalent — `~/.dsh/profiles/node_modules/@deepseek-ai` has no
+ * `dsh-client-ui-primitives`, so a guard that only looked there would silently
+ * skip forever. Callers skip when nothing resolves.
+ */
+const installedUnder = (relative, extraCandidates = []) => {
+  const roots = [
+    join(here, '..', 'node_modules', '@deepseek-ai'),
+    join(homedir(), '.dsh', 'profiles', 'node_modules', '@deepseek-ai'),
+    join(homedir(), 'AppData', 'Roaming', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai'),
   ]
-  return candidates.find((candidate) => existsSync(candidate))
+  return [...extraCandidates, ...roots.map((root) => join(root, ...relative.split('/')))]
+    .find((candidate) => existsSync(candidate))
 }
+
+const installedClientModule = () => installedUnder(
+  'dsh-api-session-controller/lib/client.js',
+  process.env.DSH_CLIENT_MODULE === undefined ? [] : [process.env.DSH_CLIENT_MODULE],
+)
 
 /**
  * The contract this plugin has with the OFFICIAL module, as a pure predicate so
@@ -149,14 +160,7 @@ test('the installed dsh client service still carries the surface this plugin use
 // invention" class as the client surface check above, on the host side of the
 // wire: the fake was fixed, and this is the guard that would have caught it.
 
-const installedPersistenceModule = () => {
-  const candidates = [
-    join(here, '..', 'node_modules', '@deepseek-ai', 'dsh-session-persistence-jsonl', 'lib', 'index.js'),
-    join(homedir(), '.dsh', 'profiles', 'node_modules', '@deepseek-ai', 'dsh-session-persistence-jsonl', 'lib', 'index.js'),
-    join(homedir(), 'AppData', 'Roaming', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-session-persistence-jsonl', 'lib', 'index.js'),
-  ]
-  return candidates.find((candidate) => existsSync(candidate))
-}
+const installedPersistenceModule = () => installedUnder('dsh-session-persistence-jsonl/lib/index.js')
 
 /**
  * The surface `lib/index.js` depends on: a `list()` that yields snapshot
@@ -192,4 +196,171 @@ test('the installed persistence backend still yields the snapshot wrapper this p
     return
   }
   assertSnapshotShape(readFileSync(modulePath, 'utf8'), modulePath)
+})
+
+// ── the installed primitives exports + the official slots (client half) ──────
+//
+// Every symbol `lib/client.js` destructures out of `dsh-client-ui-primitives` is
+// a HARD upgrade dependency, and a renamed export arrives as `undefined` — NOT
+// as an error: dsh 0.1.7's size-neutral icon rename
+// (`IconArchiveOutline20` → `IconArchiveOutlineRegular`) made
+// `React.createElement(undefined, …)` throw React error #130 and blank the
+// settings section. A renamed SLOT is worse still: the surface simply never
+// mounts and nothing is logged anywhere.
+//
+// `test/client.render.test.mjs` stubs that module with a HAND-MAINTAINED name
+// list (`PRIMITIVE_NAMES`), so it can only catch a name client.js ADDS — and
+// that suite imports no `node:fs` at all, so it can never compare against the
+// installed package. These two guards cover the OTHER direction, the one that
+// has actually broken in the field: they open the installed module and assert
+// the names are still there.
+
+const PRIMITIVES_USED = [
+  'IconArchiveOutlineRegular',
+  'IconCheckOutlineRegular',
+  'IconLoadingOutlineRegular',
+  'IconRefreshOutlineRegular',
+  'IconTrashOutlineRegular',
+  'IconWarningOutlineRegular',
+  'MenuItemButton',
+]
+
+/**
+ * A name counts as present when it still appears as an identifier in the
+ * package. Deliberately NOT a parse of the export list, and deliberately
+ * over-permissive in that direction: a harmless upstream refactor (a
+ * re-export, a renamed local alias, a different bundle layout) must keep
+ * passing, while a name that is GONE must fail. Same failure-direction choice
+ * as `assertServiceSurface` above.
+ */
+function assertPrimitivesExports(source, label) {
+  const missing = PRIMITIVES_USED.filter((name) => !new RegExp(`\\b${name}\\b`).test(source))
+  assert.deepEqual(
+    missing,
+    [],
+    `${label}: no longer exports ${missing.join(', ')} — lib/client.js destructures these, and a renamed export arrives as undefined (React error #130), not as an error`,
+  )
+}
+
+const PRIMITIVES_FIXTURES = {
+  // The shipped shape: the names are exported from the bundle.
+  current: 'const IconTrashOutlineRegular = trashArtwork;\nconst MenuItemButton = menuRow;\nexport { IconArchiveOutlineRegular, IconCheckOutlineRegular, IconLoadingOutlineRegular, IconRefreshOutlineRegular, IconTrashOutlineRegular, IconWarningOutlineRegular, MenuItemButton };',
+  // A harmless upstream refactor: destructured re-export, same names.
+  refactored: 'import * as artwork from "./icons-bundle.js";\nexport const { IconArchiveOutlineRegular, IconCheckOutlineRegular, IconLoadingOutlineRegular, IconRefreshOutlineRegular, IconTrashOutlineRegular, IconWarningOutlineRegular, MenuItemButton } = artwork;',
+  // The rename that broke the field: one icon's name is gone.
+  renamed: 'export { IconArchiveOutlineRegular, IconCheckOutlineRegular, IconLoadingOutlineRegular, IconRefreshOutlineRegular, IconTrashRegular, IconWarningOutlineRegular, MenuItemButton };',
+}
+
+test('the primitives predicate keeps the symbols this plugin destructures, and nothing more', () => {
+  assertPrimitivesExports(PRIMITIVES_FIXTURES.current, 'current')
+  assertPrimitivesExports(PRIMITIVES_FIXTURES.refactored, 'refactored')
+  assert.throws(() => assertPrimitivesExports(PRIMITIVES_FIXTURES.renamed, 'fixture'), /IconTrashOutlineRegular/)
+  assert.throws(() => assertPrimitivesExports('', 'fixture'), /MenuItemButton/)
+})
+
+test('the installed primitives still export the symbols the client half destructures', (t) => {
+  const modulePath = installedUnder('dsh-client-ui-primitives/lib/index.js')
+  if (modulePath === undefined) {
+    t.skip('no installed dsh-client-ui-primitives found — this guard is local-only')
+    return
+  }
+  assertPrimitivesExports(readFileSync(modulePath, 'utf8'), modulePath)
+})
+
+const SLOT_LITERALS = ['sidebar.workspaces.session.menu.item', 'settings.section']
+
+/** Both surfaces this plugin registers into must still be declared. */
+function assertSlotsDeclared(source, label) {
+  for (const slot of SLOT_LITERALS) {
+    assert.ok(
+      source.includes(slot),
+      `${label}: the official slot "${slot}" is gone — a renamed slot is COMPLETELY silent (the surface simply never mounts, and nothing is logged)`,
+    )
+  }
+}
+
+test('the slot predicate keeps both slots this plugin registers into, and nothing more', () => {
+  assertSlotsDeclared("register({ name: 'sidebar.workspaces.session.menu.item' }); register({ name: 'settings.section' })", 'current')
+  assert.throws(() => assertSlotsDeclared("'settings.section'", 'fixture'), /menu\.item/)
+  assert.throws(() => assertSlotsDeclared("'sidebar.workspaces.session.menu.item'", 'fixture'), /settings\.section/)
+  assert.throws(() => assertSlotsDeclared('', 'fixture'), /sidebar/)
+})
+
+test('the installed client kernel still declares both slots this plugin registers into', (t) => {
+  // The kernel enumerates the slot registry, so both literals live in one file.
+  const modulePath = installedUnder('dsh-cordis-client-runner/lib/client.js')
+  if (modulePath === undefined) {
+    t.skip('no installed dsh-cordis-client-runner found — this guard is local-only')
+    return
+  }
+  assertSlotsDeclared(readFileSync(modulePath, 'utf8'), modulePath)
+})
+
+// ── the installed session-controller LIST shape (host half) ──────────────────
+//
+// `collectSummaries()` reads `sessionController.list()`. The installed
+// controller answers `{ items: [...] }` — NEVER a bare array — its rows carry no
+// top-level `title`, and the display title is the `title` PROJECTION
+// (`item.projections.values.title`), which is also where the official browser
+// client reads it (`projectionValues?.title`). Requiring an array made every
+// summary empty on a real host — title `''`/`(untitled)`, `cwd: null`,
+// `updatedAt: null` for EVERY archived session, silently — while the host test's
+// fake, which returned exactly that invented flat array, kept the suite green.
+// The three facts below are the ones the fix depends on; AGENTS.md recorded the
+// fix as "NOT yet covered by the contract guard", and this closes that.
+
+function assertControllerListShape(source, label) {
+  assert.match(source, /\{\s*items\s*:/, `${label}: the controller no longer answers an { items } envelope — lib/index.js unwraps it`)
+  assert.match(source, /listState\.list\(/, `${label}: list() no longer delegates to listState.list()`)
+  assert.match(source, /\{\s*projections\s*\}/, `${label}: rows no longer carry the projections bag — the display title lives at item.projections.values.title`)
+}
+
+const CONTROLLER_FIXTURES = {
+  current: '\t\tasync list(_request, signal) {\n\t\t\treturn { items: await this.listState.list(signal) };\n\t\t}\n\t\tconst row = { sessionId: session.id, ...(projections === void 0 ? {} : { projections }) };',
+  // A harmless upstream refactor: same envelope, an extra field.
+  refactored: '\t\tasync list(_request, signal) {\n\t\t\tconst rows = await this.listState.list(signal);\n\t\t\treturn { items: rows, total: rows.length };\n\t\t}\n\t\tconst row = { sessionId: session.id, ...(projections === void 0 ? {} : { projections }) };',
+  // The shape this plugin used to require: a bare array.
+  bareArray: '\t\tasync list(_request, signal) {\n\t\t\treturn this.listState.list(signal);\n\t\t}\n\t\tconst row = { sessionId: session.id, ...(projections === void 0 ? {} : { projections }) };',
+  // The envelope survives but the projections bag is dropped: titles go blank.
+  withoutProjections: '\t\tasync list(_request, signal) {\n\t\t\treturn { items: await this.listState.list(signal) };\n\t\t}\n\t\tconst row = { sessionId: session.id };',
+}
+
+test('the controller-list predicate keeps the envelope, the delegation and the projections', () => {
+  assertControllerListShape(CONTROLLER_FIXTURES.current, 'current')
+  assertControllerListShape(CONTROLLER_FIXTURES.refactored, 'refactored')
+  assert.throws(() => assertControllerListShape(CONTROLLER_FIXTURES.bareArray, 'fixture'), /\{ items \} envelope/)
+  assert.throws(() => assertControllerListShape(CONTROLLER_FIXTURES.withoutProjections, 'fixture'), /projections bag/)
+})
+
+test('the installed session controller still answers the list shape this plugin unwraps', (t) => {
+  const modulePath = installedUnder('dsh-api-session-controller/lib/index.js')
+  if (modulePath === undefined) {
+    t.skip('no installed dsh-api-session-controller host module found — this guard is local-only')
+    return
+  }
+  assertControllerListShape(readFileSync(modulePath, 'utf8'), modulePath)
+})
+
+/** The display title is the `title` PROJECTION, keyed by name. */
+function assertTitleProjection(source, label) {
+  assert.match(source, /key:\s*["']title["']/, `${label}: the "title" session projection is gone — lib/index.js reads the display title from item.projections.values.title`)
+}
+
+const TITLE_FIXTURES = {
+  current: 'ctx.sessionProjections.register({ key: "title", stateSchema: titleSchema, wire: { view: (state) => state } })',
+  renamed: 'ctx.sessionProjections.register({ key: "displayTitle", stateSchema: titleSchema })',
+}
+
+test('the title-projection predicate keeps the key the plugin reads, and nothing more', () => {
+  assertTitleProjection(TITLE_FIXTURES.current, 'current')
+  assert.throws(() => assertTitleProjection(TITLE_FIXTURES.renamed, 'fixture'), /"title" session projection/)
+})
+
+test('the installed session-title package still registers the title projection', (t) => {
+  const modulePath = installedUnder('dsh-session-title/lib/index.js')
+  if (modulePath === undefined) {
+    t.skip('no installed dsh-session-title found — this guard is local-only')
+    return
+  }
+  assertTitleProjection(readFileSync(modulePath, 'utf8'), modulePath)
 })

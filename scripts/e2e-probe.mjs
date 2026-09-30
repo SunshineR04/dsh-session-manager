@@ -7,7 +7,7 @@ if (!url) {
   console.error('usage: node scripts/e2e-probe.mjs <authenticated-web-url>')
   process.exit(2)
 }
-const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
+const CHROME = process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe'
 const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: true,

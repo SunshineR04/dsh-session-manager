@@ -3,15 +3,31 @@
 // rename dialog and the plugin's delete confirmation in the same page, then
 // compares the computed card surface, radius, elevation and backdrop.
 //
-// Run: node scripts/e2e-dialog-style.mjs <url> [<screenshot-dir>]
+// MUTATING: its fallback path POSTs `session-manager/restore`, which changes the
+// archive set, so it must run against a seeded disposable home only.
+// Run: node scripts/e2e-dialog-style.mjs <url> <e2e-home-win-path> [<screenshot-dir>]
 import puppeteer from 'puppeteer-core'
 
+import { assertDisposableHome } from './e2e-guard.mjs'
+
 const url = process.argv[2]
-const shotDir = process.argv[3] ?? null
-if (!url) process.exit(2)
+const e2eHome = process.argv[3]
+const shotDir = process.argv[4] ?? null
+if (!url || !e2eHome) {
+  console.error('usage: node scripts/e2e-dialog-style.mjs <url> <e2e-home-win-path> [<screenshot-dir>]')
+  process.exit(2)
+}
+// A URL alone cannot prove which home the instance serves: refuse anything but
+// a home scripts/e2e-seed.mjs created (see scripts/e2e-guard.mjs).
+try {
+  assertDisposableHome(e2eHome, { script: 'e2e-dialog-style' })
+} catch (error) {
+  console.error(error.message)
+  process.exit(2)
+}
 
 const browser = await puppeteer.launch({
-  executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  executablePath: process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe',
   headless: true,
   args: ['--no-sandbox', '--disable-gpu', '--window-size=1440,900'],
   defaultViewport: { width: 1440, height: 900 },

@@ -15,7 +15,7 @@ if (!url) {
   process.exit(2)
 }
 
-const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
+const CHROME = process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe'
 await mkdir(outDir, { recursive: true })
 
 const browser = await puppeteer.launch({

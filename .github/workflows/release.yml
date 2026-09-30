@@ -1,0 +1,32 @@
+# Publish a GitHub release for every `v*` tag push, with notes generated from
+# the commit range. Deliberately uses the preinstalled `gh` CLI instead of a
+# third-party release action: one less supply-chain dependency for a job that
+# only ever runs on a tag.
+#
+# The CHANGELOG in the repository is the human-written record; this workflow
+# only attaches release notes to the tag. It cannot break CI: it never runs on a
+# branch push or a pull request.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag
