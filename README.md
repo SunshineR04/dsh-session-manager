@@ -110,6 +110,16 @@ bundle channel above is easier):
 
 ## Delete semantics
 
+> ⚠ **One host per `DSH_HOME`.** The pending-deletion queue is a single
+> read-modify-write file while the operation lock that serializes it is
+> per-process, so two dsh instances sharing one home can each read the same
+> snapshot and the last write wins — silently dropping the other's marker. That
+> strands its tombstone with nothing left to sweep it while its files are already
+> gone: a row that can neither be restored nor deleted again. `scripts/twohost-race-probe.mjs`
+> reproduces it against the real manager (`RESULT: LOST 1 marker(s): …`). The
+> faithful fix is a queue-format change (per-id atomic marker files) or a real
+> cross-process lock — **not** a retry loop.
+
 Deleting runs in this order:
 
 1. **Open sessions only**: a persistent pending-deletion marker is written
