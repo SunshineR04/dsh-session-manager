@@ -246,6 +246,17 @@ Two runtime halves, three **pure** modules they share, plus a bundle patch
   `bad-request`, `session-manager/internal`) matched structurally: the RPC
   client attaches `error.code` to thrown errors (`isRunningError`), tool layer
   matches on code.
+  ⚠ **A HAND-MADE call to an exact route must speak that envelope too** —
+  discovered the hard way (2026-09-30) while probing `deferred/cancel` from an
+  authenticated page: `POST /api/session-manager/<endpoint>` with
+  `content-type: application/json` (exactly that; no `; charset`) and a body of
+  `{ type: 'client-request', rpcId: '<any string>', method: '<NS>/<endpoint>', payload }`.
+  The `method` field is REQUIRED and must name the registered endpoint:
+  `rpcRouteHandler` answers `bad-request: invalid client-request message` without
+  `type`/`method`, and names both sides on a mismatch. The transport answers 405
+  for a non-POST, 415 for another content-type and 400 for a non-JSON body. The
+  browser half never spells this out (it goes through the connection service), so
+  this bullet is the only place it is written down.
 
 ## Invariants and gotchas
 

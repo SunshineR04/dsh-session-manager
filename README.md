@@ -273,6 +273,14 @@ reconnaissance, and only `e2e-residue.mjs`, `e2e-dialog-style.mjs`,
 and exit 0 whatever happened, so read their output rather than their exit code.
 Set `CHROME_PATH` if your Chrome is not at the hard-coded default path.
 
+If you hand-write a call to one of this plugin's routes (the scripts drive the
+real UI, so none of them show this), they live under the shared `/api` prefix and
+demand the connection plugin's envelope:
+`POST /api/session-manager/<endpoint>` with `content-type: application/json` and
+`{ type: 'client-request', rpcId, method: 'session-manager/<endpoint>', payload }`.
+The `method` field is required and must name the endpoint; anything else answers
+405 / 415 / 400 or `bad-request: invalid client-request message`.
+
 ## References
 
 Built after studying these projects (some locally inspectable under

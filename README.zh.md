@@ -227,6 +227,12 @@ node scripts/e2e-residue.mjs <URL> --home <e2e-home>  # 5. 残留验收：两个
 过程记录并以 0 退出，所以请看它的输出，而不是退出码。Chrome 不在默认路径时
 设置 `CHROME_PATH`。
 
+如果你想手写调用本插件的路由（这些脚本都走真实 UI，所以都没体现这一点）：路由挂在共享的
+`/api` 前缀下，并且要求 connection 插件那套信封 ——
+`POST /api/session-manager/<endpoint>`，`content-type: application/json`，body 为
+`{ type: 'client-request', rpcId, method: 'session-manager/<endpoint>', payload }`。
+其中 `method` 必填且必须与端点一致；否则会得到 405 / 415 / 400 或
+`bad-request: invalid client-request message`。
 ## 参考项目
 
 本插件在开发前调研了以下 GitHub 项目（其中部分可直接在本地

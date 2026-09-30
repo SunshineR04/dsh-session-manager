@@ -216,15 +216,17 @@ const confirmed = await page.evaluate(() => {
 record('confirmed', confirmed)
 await sleep(3500)
 
-const toast = await page.evaluate(() => {
-  const el = document.querySelector('[data-sm-toast]')
-  return el === null ? null : el.textContent.slice(0, 160)
-})
-record('toast', toast)
+// EVERY toast is inspected, not just the first. A delete that also emitted a
+// warning — e.g. `the session artifact directory could not be removed: …` when
+// something holds the log open — shows that warning FIRST and the open-session
+// confirmation after it, so reading `querySelector` (the first element) made this
+// precondition fail on a delete that had in fact taken the right path.
+const toasts = await page.evaluate(() => [...document.querySelectorAll('[data-sm-toast]')].map((el) => el.textContent.slice(0, 160)))
+record('toasts', toasts)
 // Pin the OPEN-session path: only that delete reports the lingering in-memory
 // copy, and only that shape leaves the tombstone this run is about.
-if (toast === null || !toast.includes('残留的内存副本')) {
-  throw new Error(`the delete did not take the open-session path (toast: ${String(toast)})`)
+if (!toasts.some((text) => text.includes('残留的内存副本'))) {
+  throw new Error(`the delete did not take the open-session path (toasts: ${JSON.stringify(toasts)})`)
 }
 
 // Give the residue watch its full window (repair debounce + a list pull).
