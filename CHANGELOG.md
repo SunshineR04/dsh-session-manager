@@ -10,7 +10,26 @@ so a change that requires a newer dsh host says so explicitly.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed — the e2e isolation recipe, and the seed's stale-data trap
+
+- **The isolation recipe was wrong.** Both READMEs and AGENTS.md recommended
+  `ELECTRON_RUN_AS_NODE=1 ... --expose-internals "<app.asar>/lib/desktop-cli.js"`;
+  on the installed desktop build that asar path does not resolve and the CLI
+  exits with `MODULE_NOT_FOUND` (verified 2026-09-30 while running the
+  real-browser acceptance). They now use the disk-based CLI shipped in the dsh
+  npm package — `node "$(npm root -g)/@deepseek-ai/dsh/lib/bin.js"` — with the
+  three commands that were actually used end to end: `--from-default-profile web
+  --dump-config` to create the profile without booting, `plugin … add` to install
+  this plugin, and `--no-open --port <port>` to boot and print the token URL.
+- **`e2e-seed.mjs` refuses a stale spec instead of producing a misleading home.**
+  It used to warn once per session it could not copy and then write the marker
+  ANYWAY, so a spec whose ids had since been deleted yielded a home that looked
+  correctly seeded but had no openable session: the acceptance scripts then could
+  not run, and the failure surfaced much later looking like a plugin bug (hit in
+  the field on 2026-09-30 — all six ids were gone, every copy failed with ENOENT,
+  and the seed still exited 0). It now checks every named session BEFORE creating
+  anything and exits 2 with the missing paths, so nothing is left behind to clean
+  up.
 
 ## [0.4.4] - 2026-09-30
 

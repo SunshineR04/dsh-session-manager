@@ -55,6 +55,26 @@ try {
 const SESSIONS = spec.sessions.map((entry) => [entry.project, entry.id, entry.archived === true])
 const WORKSPACES = spec.workspaces
 
+// Every spec'd session must EXIST before anything is created.
+//
+// A stale spec (ids get deleted from the source home over time) used to warn
+// once per missing copy and then write the marker ANYWAY, producing a home that
+// looks correctly seeded but has no openable session: the acceptance scripts
+// then cannot run, and the failure surfaces much later looking like a plugin
+// bug. Verified in the field 2026-09-30 — all six ids had been deleted, every
+// copy failed with ENOENT, and the seed still exited 0. Nothing has been
+// created at this point, so refusing outright costs nothing.
+const missing = SESSIONS.filter(([project, id]) => !existsSync(join(sourceHome, 'sessions', project, id)))
+if (missing.length > 0) {
+  for (const [project, id] of missing) {
+    console.error(`e2e-seed: session not found: ${join(sourceHome, 'sessions', project, id)}`)
+  }
+  console.error(`e2e-seed: ${missing.length} of ${SESSIONS.length} session(s) in the spec no longer exist in ${sourceHome}.`)
+  console.error('e2e-seed: update scripts/e2e-seed.local.json to sessions that exist TODAY, and keep at least one NON-archived')
+  console.error('e2e-seed: (the sidebar hides archived rows by default, so an all-archived spec leaves nothing to open).')
+  process.exit(2)
+}
+
 await rm(join(e2eHome, 'sessions'), { recursive: true, force: true })
 await rm(join(e2eHome, 'storages'), { recursive: true, force: true })
 await mkdir(join(e2eHome, 'sessions'), { recursive: true })

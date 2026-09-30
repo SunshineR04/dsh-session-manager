@@ -201,11 +201,16 @@ node scripts/e2e-seed.mjs <e2e-home> ~/.dsh          # 1. 播种隔离测试 HOM
 # 2. 在该 HOME 下建 profile 装本插件，再启动测试 web 实例。
 #    ⚠ 桌面版 `dsh` 启动器把 DSH_HOME 写死为真实 home，因此前缀
 #    DSH_HOME=<e2e-home> 并不能隔离（已实测：profile 会落到真实 home）。
-#    改为直接调用 CLI 入口——`plugin add` 已实测通过，serve 参数同形：
-#      ELECTRON_RUN_AS_NODE=1 DSH_HOME=<e2e-home> "<DSH Desktop.exe>" --expose-internals \
-#        "<app.asar>/lib/desktop-cli.js" plugin --profile sm-test add <tarball>
-#      ELECTRON_RUN_AS_NODE=1 DSH_HOME=<e2e-home> "<DSH Desktop.exe>" --expose-internals \
-#        "<app.asar>/lib/desktop-cli.js" --profile sm-test --port 43123 --no-open
+#    改为用一个能指向该 home 的 Node CLI —— dsh npm 包里的那个入口：
+#    ⚠ 不要再使用本文件早期版本推荐的 `--expose-internals "<app.asar>/lib/desktop-cli.js"`
+#    形式：在某些桌面构建上该 asar 路径解析不了，CLI 会以 MODULE_NOT_FOUND 退出
+#    （2026-09-30 针对已装桌面端实测）。
+#      DSH=$(npm root -g)/@deepseek-ai/dsh/lib/bin.js
+#      DSH_HOME=<e2e-home> node "$DSH" --profile sm-test --from-default-profile web --dump-config
+#        ^ 从内置 web 模板建 profile 后直接退出（不启动）
+#      DSH_HOME=<e2e-home> node "$DSH" plugin --profile sm-test add <tarball>
+#      DSH_HOME=<e2e-home> node "$DSH" --profile sm-test --no-open --port 43123
+#        ^ 启动；打印的那一行里带 token URL
 node scripts/e2e-check.mjs <打印出的带 token 的 URL>  # 3. 只读检查：三点菜单/设置页
 node scripts/e2e-mutations.mjs <URL> <e2e-home>       # 4. 闭环：恢复→归档→彻底删除
 node scripts/e2e-residue.mjs <URL> --home <e2e-home>  # 5. 残留验收：两个视图都不该有该行

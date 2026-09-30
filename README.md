@@ -242,12 +242,18 @@ node scripts/e2e-seed.mjs <e2e-home> ~/.dsh         # 1. seed the isolated test 
 # 2. create a profile in that HOME with this plugin, then start the test web instance.
 #    ⚠ The desktop `dsh` shim hardcodes DSH_HOME=<real home>, so prefixing the
 #    command with DSH_HOME=<e2e-home> does NOT isolate (verified: the profile
-#    lands in the real home). Invoke the CLI entry directly instead — verified
-#    for `plugin add`; use the same form for the serve flags:
-#      ELECTRON_RUN_AS_NODE=1 DSH_HOME=<e2e-home> "<DSH Desktop.exe>" --expose-internals \
-#        "<app.asar>/lib/desktop-cli.js" plugin --profile sm-test add <tarball>
-#      ELECTRON_RUN_AS_NODE=1 DSH_HOME=<e2e-home> "<DSH Desktop.exe>" --expose-internals \
-#        "<app.asar>/lib/desktop-cli.js" --profile sm-test --port 43123 --no-open
+#    lands in the real home). Point a Node CLI at that home instead — the one
+#    shipped inside the dsh npm package is a plain entry point, no Electron:
+#    ⚠ Do NOT use the `--expose-internals "<app.asar>/lib/desktop-cli.js"` form
+#    an earlier revision of this file recommended: on some app builds that asar
+#    path does not resolve and the CLI dies with MODULE_NOT_FOUND (verified
+#    2026-09-30 against the installed desktop build).
+#      DSH=$(npm root -g)/@deepseek-ai/dsh/lib/bin.js
+#      DSH_HOME=<e2e-home> node "$DSH" --profile sm-test --from-default-profile web --dump-config
+#        ^ creates the profile from the shipped web template and exits (no boot)
+#      DSH_HOME=<e2e-home> node "$DSH" plugin --profile sm-test add <tarball>
+#      DSH_HOME=<e2e-home> node "$DSH" --profile sm-test --no-open --port 43123
+#        ^ boots; the printed line carries the token URL
 node scripts/e2e-check.mjs <printed token URL>      # 3. read-only checks: menu item / settings page
 node scripts/e2e-mutations.mjs <URL> <e2e-home>     # 4. closed loop: restore → archive → delete
 node scripts/e2e-residue.mjs <URL> --home <e2e-home>  # 5. residue acceptance: neither view shows the row

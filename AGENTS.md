@@ -95,11 +95,27 @@ pnpm test   # node --check on both libs + host + client render + contract tests
   `set "DSH_HOME=<real home>"`**, so `DSH_HOME=<e2e-home> dsh ...` does NOT
   isolate — verified: `dsh plugin add` under that env created the profile in
   the real home (delete such a profile if it happens; nothing else is touched).
-  Verified isolation recipe — call the CLI entry directly with the env set:
-  `ELECTRON_RUN_AS_NODE=1 DSH_HOME=<e2e-home> "<DSH Desktop.exe>" --expose-internals "<app.asar>\lib\desktop-cli.js" plugin --profile <name> add <pkg>`
-  (installs into `<e2e-home>/profiles/<name>`, real home untouched). The seed reads
-  machine-specific data from `scripts/e2e-seed.local.json` (gitignored; copy
-  `e2e-seed.local.example.json`) — keep real paths/session ids out of the repo.
+  Verified isolation recipe — point the CLI shipped in the dsh npm package at
+  that home (a plain Node entry point, no Electron):
+  `DSH_HOME=<e2e-home> node "$(npm root -g)/@deepseek-ai/dsh/lib/bin.js" --profile <name> --from-default-profile web --dump-config`
+  creates the profile from the shipped template and exits without booting;
+  `... plugin --profile <name> add <pkg>` installs into
+  `<e2e-home>/profiles/<name>`; `... --profile <name> --no-open --port <port>`
+  boots and prints the token URL. All three verified 2026-09-30.
+  ⚠ **Do NOT use the `<DSH Desktop.exe> --expose-internals "<app.asar>\lib\desktop-cli.js"`
+  form an earlier revision of this file recommended** — on the installed desktop
+  build that asar path does not resolve and the CLI dies with `MODULE_NOT_FOUND`
+  (verified 2026-09-30). If the disk CLI ever disappears, find the real entry
+  point inside the asar before trusting that form again.
+  ⚠ **The seed spec goes stale silently unless you check**: `e2e-seed.local.json`
+  names real session ids, and session ids get deleted over time. The seed now
+  refuses (exit 2, nothing created) when any named session is missing — when
+  that fires, update the spec to sessions that exist TODAY, and make sure the
+  session you intend to open is the NON-archived one (the sidebar hides
+  archived rows by default, so an all-archived spec leaves nothing to open).
+  The seed reads machine-specific data from `scripts/e2e-seed.local.json`
+  (gitignored; copy `e2e-seed.local.example.json`) — keep real paths/session
+  ids out of the repo.
 
 ## Architecture
 
