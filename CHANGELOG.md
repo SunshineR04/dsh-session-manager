@@ -10,6 +10,10 @@ so a change that requires a newer dsh host says so explicitly.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.5] - 2026-09-30
+
 ### Fixed — the e2e isolation recipe, and the seed's stale-data trap
 
 - **The isolation recipe was wrong.** Both READMEs and AGENTS.md recommended
