@@ -10,6 +10,30 @@ so a change that requires a newer dsh host says so explicitly.
 
 ## [Unreleased]
 
+### Changed — the registry write rules are a tested unit of their own
+
+- **`lib/registry-writes.js` (new).** The archive-set read/write rules —
+  `registryState`, `unarchiveThrough`, `archiveThrough`, `assertRegistryWritable`
+  — moved out of `lib/index.js` (1465 → 1375 lines) into a host-free module that
+  takes the error class as an injected seam, the same shape
+  `lib/artifact-paths.js` uses. They decide whether a durable write may happen at
+  all, and until now they were reachable only through a mounted host.
+- **`test/registry-writes.test.mjs` (new, 14 cases)** pins them directly:
+  `requireState` wins over a reconstruction; a reconstruction is marked and
+  refuses every write (`registry/unavailable`); the official
+  `archiveSession(id, { stopActivity: true })` is preferred and the option is
+  load-bearing for `allowDeleteRunning`; the `setState` fallback is only legal
+  with a faithful `requireState`, spreads the fields it does not own, and is
+  no-op-safe; one half of the official pair is not enough.
+  ⚠ Two of the fourteen initially failed, and the tests were wrong, not the code:
+  the `setState` fallback cannot run when only a reconstructed state is available.
+  That contract is now written down in the suite's header.
+- Mutation-checked: dropping `stopActivity: true` and removing the
+  reconstructed-state refusal each fail exactly one case; both mutations were
+  reverted and the file re-verified (`pnpm test` 159/159, 7 suites).
+- Registered in BOTH `package.json → files` and `scripts.test` (plus
+  `scripts.check`) — the rule AGENTS.md calls out for a new runtime file.
+
 ### Verified — the cross-process queue boundary, and a CI-only test race
 
 - **Two hosts on one `DSH_HOME` can lose a pending marker — confirmed.** The

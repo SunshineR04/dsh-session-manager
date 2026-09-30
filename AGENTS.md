@@ -126,17 +126,18 @@ pnpm test   # node --check on both libs + host + client render + contract tests
 
 ## Architecture
 
-Two runtime halves, three **pure** modules they share, plus a bundle patch
+Two runtime halves, four **pure** modules they share, plus a bundle patch
 (`cordis.patch.yml` merely inserts the plugin row; `dsh plugin add` applies it):
 
-- **`lib/pending-queue.js`**, **`lib/session-summaries.js`** and
-  **`lib/artifact-paths.js` — the pure halves.** No `ctx`: the pending queue's
-  format / versioning / input sanitization, the controller-list envelope + row
-  projection, and the three-seam artifact resolution (that one takes its seams
-  INJECTED, so it is still host-free). They exist so the seams whose SILENT
+- **`lib/pending-queue.js`**, **`lib/session-summaries.js`**,
+  **`lib/artifact-paths.js`** and **`lib/registry-writes.js` — the pure halves.**
+  No `ctx`: the pending queue's format / versioning / input sanitization, the
+  controller-list envelope + row projection, the three-seam artifact resolution,
+  and the registry read/write rules (the last two take their seams INJECTED — a
+  persistence getter, the error class — so they stay host-free). They exist so the seams whose SILENT
   failure actually reached users are unit-testable without standing up a host
   (`test/pending-queue.test.mjs`, `test/session-summaries.test.mjs`,
-  `test/artifact-paths.test.mjs`). Keep them host-free — the moment one needs
+  `test/artifact-paths.test.mjs`, `test/registry-writes.test.mjs`). Keep them host-free — the moment one needs
   `ctx`, the extraction has lost its point. Their semantics are load-bearing: a
   malformed id that reaches the filesystem turns the raw sessions-root scan into
   a path-traversal delete, a torn queue file must be `degraded` rather than
@@ -151,7 +152,7 @@ Two runtime halves, three **pure** modules they share, plus a bundle patch
   (`connection.fetch.register({ path: `${CHANNEL}/${endpoint}`, methods:
   ['POST'], requestBody: 'buffered', fetch })` — the shape the official
   dsh-session-log-export uses) and agent tools (`tools.register`).
-  It imports the three pure modules above and keeps only the ctx-bound parts:
+  It imports the four pure modules above and keeps only the ctx-bound parts:
   the manager closure, the operation lock, the RPC handler and `apply`.
   ⚠ 0.1.5-rc host compatibility, three traps in one place — keep all three
   invariants or the whole surface silently dies:
