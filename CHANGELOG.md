@@ -10,6 +10,10 @@ so a change that requires a newer dsh host says so explicitly.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.6] - 2026-09-30
+
 ### Added — packaging guards (the "register a new file" rule is now machine-enforced)
 
 - **`test/packaging.test.mjs` (new, 6 cases).** AGENTS.md has always stated that a
