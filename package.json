@@ -7,7 +7,7 @@
   "main": "lib/index.js",
   "scripts": {
     "check": "node --check lib/index.js && node --check lib/pending-queue.js && node --check lib/session-summaries.js && node --check lib/artifact-paths.js && node --check lib/registry-writes.js && node --check lib/client.js",
-    "test": "pnpm run check && node --test test/pending-queue.test.mjs test/session-summaries.test.mjs test/artifact-paths.test.mjs test/registry-writes.test.mjs test/host.test.mjs test/client.render.test.mjs test/contract.test.mjs"
+    "test": "pnpm run check && node --test test/pending-queue.test.mjs test/session-summaries.test.mjs test/artifact-paths.test.mjs test/registry-writes.test.mjs test/packaging.test.mjs test/host.test.mjs test/client.render.test.mjs test/contract.test.mjs"
   },
   "exports": {
     ".": "./lib/index.js",

@@ -10,7 +10,8 @@ TypeScript, no linter, no bundler. Package manager is **pnpm**; Node >= 20
 
 ```bash
 pnpm install
-pnpm test   # node --check on both libs + host + client render + contract tests
+pnpm test   # scripts.check (node --check, every lib file) + 8 suites; the list in
+            # package.json -> scripts.test is the whole truth
 ```
 
 - `node --test test/` (as written in some docs) **fails on Windows** — Node

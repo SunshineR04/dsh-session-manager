@@ -10,6 +10,22 @@ so a change that requires a newer dsh host says so explicitly.
 
 ## [Unreleased]
 
+### Added — packaging guards (the "register a new file" rule is now machine-enforced)
+
+- **`test/packaging.test.mjs` (new, 6 cases).** AGENTS.md has always stated that a
+  new runtime file must be added to BOTH `package.json → files` and
+  `scripts.test`, and that rule has been the failure mode more than once: a file
+  missing from `files` ships a broken package while every local run stays green,
+  and a suite missing from `scripts.test` never runs at all. The suite now asserts
+  it mechanically — every `lib/*.js` is in `files` and in `scripts.check`, every
+  `test/*.test.mjs` on disk is named in `scripts.test`, every suite named there
+  exists and appears once, the package entry points resolve, and the bundle patch
+  is both what `dsh.bundle.patch` declares and what `files` ships.
+  Mutation-checked: dropping a lib file from `files`, and unregistering a suite
+  from `scripts.test`, each fail exactly one case (both reverted).
+- AGENTS.md's `pnpm test` comment said "both libs" while the repo has six lib
+  files and eight suites; it now describes what actually runs.
+
 ### Changed — the registry write rules are a tested unit of their own
 
 - **`lib/registry-writes.js` (new).** The archive-set read/write rules —
