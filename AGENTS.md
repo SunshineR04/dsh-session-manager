@@ -38,6 +38,13 @@ pnpm test   # node --check on both libs + host + client render + contract tests
   refactor of its delegation body) must pass, a missing entry must fail — so
   relaxing that assertion can never silently blind it. It **skips where dsh is
   absent** (CI), so do not read a green CI run as "the surface was verified".
+  ⚠ Making them run in CI is NOT a workflow tweak, and that was checked rather
+  than assumed (2026-09-30): of the packages the guards resolve, only
+  `@deepseek-ai/dsh` (0.2.0-rc.2) is published — `dsh-session-persistence-jsonl`
+  and `dsh-cordis-client-runner` are 404 on npm in any form, so the modules the
+  host-side guard needs cannot be installed on a runner at all. Running the
+  contract suite on a machine WITH dsh installed is therefore the only place
+  these guards can execute; keep doing that on every dsh upgrade.
   Its `makeCtx()` fake keys captured components **by slot name** — `apply()`
   registers into two slots, and the single shared variable this used to be
   would let the last registration win, silently mounting the menu row into
@@ -431,6 +438,20 @@ Two runtime halves, three **pure** modules they share, plus a bundle patch
   `finishDeferredDeletion`) use the `_addPending`/`_removePending` internals,
   never the public lock-taking wrappers. The queue READ is lock-free by design
   (atomic-rename writes; callers only ever want a snapshot).
+  ⚠ **The lock is per-MANAGER, so two hosts sharing one `DSH_HOME` can still lose
+  a marker** — confirmed, not theoretical: `node scripts/twohost-race-probe.mjs`
+  (two managers, one temp home, one concurrent `addPending` each) prints
+  `RESULT: LOST 1 marker(s): …`, and WHICH side loses varies run to run. Both read
+  the same snapshot, both write their own on top, last write wins. A lost marker
+  strands its tombstone in the archive set with no queue entry left to sweep it
+  while its files are already gone — the stuck-ghost-row shape this plugin exists
+  to prevent. Nothing here can serialize across processes: a faithful fix needs
+  per-id atomic marker files (`open(…, 'wx')`, a queue-format change) or a real
+  cross-process lock. ⚠ A verify-then-retry around the aggregate write is NOT a
+  fix: the winner's verification can complete before the loser clobbers it, so it
+  converges only by luck — do not add one and call this closed. Until the format
+  changes, the supported configuration is ONE host per `DSH_HOME`; this bullet
+  plus the probe are the whole record of why.
   ⚠ **That lock only serializes THIS plugin.** Archive-set writes must therefore
   go through the registry's OWN serialized entry points —
   `unarchiveThrough(reg, id)` / `archiveThrough(reg, id)` prefer

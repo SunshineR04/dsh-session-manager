@@ -10,7 +10,27 @@ so a change that requires a newer dsh host says so explicitly.
 
 ## [Unreleased]
 
-Nothing yet.
+### Verified — the cross-process queue boundary, and a CI-only test race
+
+- **Two hosts on one `DSH_HOME` can lose a pending marker — confirmed.** The
+  operation lock is per-manager while the pending queue is one read-modify-write
+  file, so two hosts read the same snapshot and the last write wins.
+  `scripts/twohost-race-probe.mjs` (new, checked in) reproduces it against the
+  real manager: `RESULT: LOST 1 marker(s): …`. A lost marker strands its tombstone
+  with nothing left to sweep it while its files are gone — the stuck-ghost-row
+  shape. No fix is included on purpose: the faithful ones are per-id atomic marker
+  files (a queue-format change) or a real cross-process lock, and an optimistic
+  verify-then-retry is not one, because the winner can verify before the loser
+  clobbers it. Supported configuration: one host per `DSH_HOME`; AGENTS.md carries
+  the full record.
+- **A test race that only Ubuntu could lose is fixed.**
+  `apply schedules the boot sweep…` bounded its drain loop by event-loop TURNS
+  (500 `setImmediate`s) while the sweep's stages land on threadpool filesystem
+  I/O: Ubuntu drains 500 turns in ~13 ms, long before the queue write-back is
+  observable, so the assertion failed there and passed on Windows (where those
+  same turns take hundreds of ms). The bound is now 5 s of wall clock. The product
+  was never at fault — the boot timer already calls the unthrottled
+  `sweepPending()`.
 
 ## [0.4.5] - 2026-09-30
 
