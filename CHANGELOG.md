@@ -10,7 +10,11 @@ so a change that requires a newer dsh host says so explicitly.
 
 ## [Unreleased]
 
-### Changed — the two failure-prone seams are now pure modules
+Nothing yet.
+
+## [0.4.4] - 2026-09-30
+
+### Changed — the three failure-prone seams are now pure modules
 
 - `lib/pending-queue.js` (the queue's format, v1/v2 compatibility and input
   sanitization) and `lib/session-summaries.js` (the controller-list envelope and
