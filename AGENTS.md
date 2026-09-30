@@ -24,10 +24,16 @@ pnpm test   # scripts.check (node --check, every lib file) + 8 suites; the list 
   Client-side render crashes (hook order, TDZ) blank the whole settings pane
   and are invisible to host tests; always run the render tests after touching
   `lib/client.js`. It takes the section's props from the production `inject:`
-  face (only `rpc` is overridden), so the real `refreshUntilGone` closure is
-  under test, and its service fakes expose the OFFICIAL surface only (`list` +
-  `refresh()`) behind a Proxy that throws on any other name — a method the real
-  service does not carry must fail there, never silently skip in production.
+  face (the `rpc` override applies only when a test supplies one — call
+  `renderSection()` with no arguments to drive the REAL `ctx.get('connection')`
+  wrapper, which is how the structured-error-code test works), so the real
+  `refreshUntilGone` closure is under test, and its service fakes expose the
+  OFFICIAL surface only (`list` + `refresh()`) behind a Proxy that throws on any
+  other name — a method the real service does not carry must fail there, never
+  silently skip in production. A test that leaves the module-level
+  `menuConfirmBusy` set will silently break every later menu test (they get the
+  busy toast instead of a dialog), so release any held in-flight delete in the
+  test's `finally` before unmounting.
   Its `ctx.effect` stub captures cleanups **by label** (`runDisposer(label)`),
   which is what makes the teardown paths testable at all: the previous
   `effect: (fn) => fn()` dropped every disposer.
@@ -91,14 +97,60 @@ pnpm test   # scripts.check (node --check, every lib file) + 8 suites; the list 
   and any other target must be either already marked or EMPTY. Never move that
   check below the first `rm`: a guard that runs after the delete is not a guard.
   Keep the guard on any new destructive script.
-  ℹ **Assertion status — do not mistake a transcript for a test.** Only
-  `e2e-residue.mjs`, `e2e-dialog-style.mjs`, `e2e-realclick.mjs` and the guard
-  itself can FAIL. `e2e-check.mjs`, `e2e-mutations.mjs`, `e2e-bug2.mjs`,
-  `e2e-live.mjs` and `e2e-probe.mjs` print a transcript and exit 0 whatever
-  happened: read their output, never their exit code. `e2e-bug2.mjs` reproduces
-  a fixed field bug (superseded by `e2e-residue.mjs`) and `e2e-probe.mjs` is
-  one-off DOM reconnaissance — both are kept as diagnostics, not as acceptance
-  tests.
+  ℹ **Assertion status — do not mistake a transcript for a test.** These can
+  FAIL: `e2e-residue.mjs`, `e2e-dialog-style.mjs`, `e2e-realclick.mjs`,
+  `e2e-contrast.mjs` and the guard itself. `e2e-check.mjs`, `e2e-mutations.mjs`,
+  `e2e-bug2.mjs`, `e2e-live.mjs` and `e2e-probe.mjs` print a transcript and exit
+  0 whatever happened: read their output, never their exit code. (A CRASH — no
+  Chrome, a navigation timeout — still exits non-zero, so the exit code separates
+  "broke" from "assertion failed", not "passed" from "failed".) `e2e-bug2.mjs`
+  reproduces a fixed field bug (superseded by `e2e-residue.mjs`) and
+  `e2e-probe.mjs` is one-off DOM reconnaissance — both are kept as diagnostics,
+  not as acceptance tests.
+  ⚠ **Row and menu-item lookups must go through the official hooks, never text
+  or geometry.** The scripts used to find a session row by
+  `button[aria-label*="的操作"]` plus a "walk up to a wide element" climb — which
+  matched the **WORKSPACE** row (whose label is `工作区“…”的操作`), so those runs
+  silently exercised the wrong element and their `[row] null` read as a fixture
+  problem. Session rows carry NO aria-label; `data-row-key="session:<id>"` is the
+  hook. Menu items must be matched by **substring** (`includes('彻底删除')`): dsh
+  appends shortcut hints (`归档会话` → `归档会话Ctrl+Alt+A`), so an `===` match
+  silently stopped matching once already.
+  ⚠ **A session row's action cluster is not in the DOM until the row is both
+  OPENED and hovered**, and its trigger is NOT a descendant reachable by
+  `row.querySelectorAll` — it renders in a sibling `rowActions` span. Locate it by
+  the official label `会话“<title>”的操作`, and take the title from a CHILD
+  element (`[...row.children]`), never `row.textContent`: that concatenates the
+  relative-date badge (`Review session zip archive21天`) and therefore never
+  matches. POLL for the trigger (≤8s, re-hovering each round) — opening a session
+  materialises the cluster on a host round-trip, so a single probe reports "no
+  menu" for a row that has one. Only a non-empty session has a cluster at all
+  (`新会话` renders 0 buttons), so pick a row that has one.
+  ⚠ **The trigger must be scoped by TITLE when several session rows are open** —
+  `document.querySelector('button[aria-label^="会话"]')` returns the FIRST
+  session's button, which on a page with two rows is the wrong session.
+  ⚠ `e2e-realclick.mjs`'s bug-1 checks are real `exit 1` assertions now. They were
+  `console.log` calls, so a true regression (no dialog on a real click) exited 0
+  while this file, README.md and README.zh.md all called it a script that can FAIL.
+  ⚠ **`e2e-contrast.mjs` is the contrast acceptance test** (`node scripts/e2e-contrast.mjs
+  <url> <e2e-home>`; needs a seeded home whose ARCHIVE SET IS NON-EMPTY, or it
+  exits 2 with nothing to measure). It measures the plugin's danger TEXT in both
+  themes against the surface it actually paints on. It exists because jsdom
+  computes no colours and because this failure is theme-dependent: `red-400` is
+  4.24:1 on the dark card but 3.29:1 on white, `red-600` is 4.4976:1 on white
+  (just under the floor) but 3.10:1 on the dark card, so NO single scale entry
+  clears AA in both. `TOKENS.dangerText` therefore uses `light-dark()`, which the
+  host's own `color-scheme: light|dark` makes resolvable in inline styles; the
+  shipped literals measure 4.83:1 light and 4.73:1 dark. Do not "simplify" it
+  back to a single `--dsw-*` alias — measure first (`npm run` has no browser, so
+  run the script).
+  ⚠ **The e2e fixtures are consumable.** The seed spec bakes in ONE non-blank,
+  non-archived session, and `e2e-residue.mjs` DELETES it — so a later script that
+  needs a restorable/openable session (`e2e-dialog-style.mjs` on its fallback
+  path) fails with `no restorable session to open` on an already-used home. That
+  is a spent fixture, not a plugin bug: re-seed, or add more sessions to the spec,
+  before drawing conclusions. The seed also refuses a stale spec outright (exit 2,
+  nothing created), which is the supported way to find out.
   ⚠ **The desktop `dsh.cmd` shim hardcodes
   `set "DSH_HOME=<real home>"`**, so `DSH_HOME=<e2e-home> dsh ...` does NOT
   isolate — verified: `dsh plugin add` under that env created the profile in
@@ -368,8 +420,9 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
   `openAtDelete: true`; the next-boot sweep clears the tombstone even when
   `sessionKnown` is false, and the settings page filters queued ids out of its
   rows. `deferred/list` reports which queued ids are still `recoverable`;
-  `deferred/cancel` READS the queue first, then clears the tombstone, then drops
-  the marker, and REFUSES entries whose files are already gone
+  `deferred/cancel` READS the queue, DROPS THE MARKER, then clears the tombstone
+  — **and rewrites the marker if the registry write fails** — and REFUSES entries
+  whose files are already gone
   (`session/data-gone`) — which is why the cancel button's absence on cleaned-up
   ids is a protocol rule, not a convention. Only `recoverable` ids get a Cancel
   button; cleaned-up ids collapse into one summary line. `restoreSession` REFUSES
@@ -377,6 +430,35 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
   `allowDeleteRunning`. `isOpen` alone decides the treatment (tombstone, pending
   marker, `openAtDelete`). Rationale and rejected alternatives:
   `docs/delete-semantics.md`.
+  ⚠ **The cancel's two durable writes are ordered marker-FIRST for a data-safety
+  reason — do not "restore" the old tombstone-first order.** A crash or failure
+  between them strands one of two states: "marker dropped, tombstone set" is
+  harmless (hidden, and nothing finishes a deletion without a queued marker)
+  while "tombstone cleared, marker set" is DATA LOSS — the boot sweep reads the
+  surviving marker and deletes the session the user just cancelled, after telling
+  them the cancel failed (proven by probe, then pinned by the host test "a cancel
+  the registry refuses puts the marker back…"). The marker is rolled back with
+  `_addPending` when `unarchiveThrough` fails, so the registry-failure case stays
+  retryable too.
+  ⚠ **`finishDeferredDeletion` keeps the OPPOSITE order (tombstone first, marker
+  last), also deliberately.** There both writes pull toward the same outcome
+  (finish the deletion), so a stranded marker is just an unfinished delete that
+  the next boot completes, whereas a stranded tombstone would hide a session that
+  can never be restored; the marker also goes last because "the queue no longer
+  holds the id" is what the caller and the boot-sweep test read as "finished".
+  ⚠ **A liveness seam that THROWS is not the same as one that answers "no".**
+  `readLiveEntry` separates them: `deleteSession` treats "unknown" as cold (the
+  user asked for this deletion; refusing over a diagnostic read would break a
+  confirmed delete), while the autonomous boot sweep KEEPS the entry queued —
+  a seam that is down is exactly when a session may still be open. The host test
+  "a failed liveness check leaves the entry queued" is that contract.
+  ⚠ **Registry bookkeeping in the commit zone is best-effort for the DETACH
+  half**: a throwing `workspace.detachSession` is collected as a warning instead
+  of aborting, because aborting mid-loop left the session half-detached, still
+  archived and with its files intact — the "ungrouped resurrection" shape. An
+  unusable registry still fails the delete at the archive-set write, which
+  reports `details.queued === true` when an open delete's marker is already
+  durable.
 - **ONE operation mutex serializes every durable mutation** (`withOperationLock`):
   both the read-modify-write pending-queue file (five entry points: boot
   timer sweep, ping sweep, `deferred/list` sweep, deletes, cancels) and the

@@ -267,7 +267,12 @@ node scripts/e2e-seed.mjs <e2e-home> ~/.dsh         # 1. seed the isolated test 
 node scripts/e2e-check.mjs <printed token URL>      # 3. read-only checks: menu item / settings page
 node scripts/e2e-mutations.mjs <URL> <e2e-home>     # 4. closed loop: restore → archive → delete
 node scripts/e2e-residue.mjs <URL> --home <e2e-home>  # 5. residue acceptance: neither view shows the row
+node scripts/e2e-contrast.mjs <URL> <e2e-home>      # 6. WCAG AA contrast of the danger text, both themes
 ```
+
+⚠ Step 6 needs a seeded home whose **archive set is non-empty** (the seed creates
+one archived session); it exits 2 with nothing to measure otherwise. It is
+read-only: it archives and deletes nothing.
 
 ⚠ Steps 4 and 5 **really delete sessions**: the `--home` argument (or step 4's
 second positional) is now required, and the home must carry the marker
@@ -277,10 +282,19 @@ instance behind it serves (see `scripts/e2e-guard.mjs`).
 
 The remaining scripts are diagnostics, not acceptance tests:
 `e2e-bug2.mjs` and `e2e-live.mjs` reproduce fixed field bugs (both delete, both
-guarded), `e2e-realclick.mjs` and `e2e-probe.mjs` are one-off DOM
-reconnaissance, and only `e2e-residue.mjs`, `e2e-dialog-style.mjs`,
-`e2e-realclick.mjs` and the guard itself can FAIL — the rest print a transcript
-and exit 0 whatever happened, so read their output rather than their exit code.
+guarded), and `e2e-probe.mjs` is one-off DOM reconnaissance. **Which scripts can
+actually FAIL** — an important distinction, because a transcript that always
+exits 0 is not a test however reassuring it reads:
+
+| script | can fail? |
+|---|---|
+| `e2e-residue.mjs` | yes (throws → exit 1) |
+| `e2e-dialog-style.mjs` | yes (8 style checks, throws on any failure) |
+| `e2e-realclick.mjs` | yes — its bug-1 hover/click assertions are real `exit 1` paths, not log lines |
+| `e2e-contrast.mjs` | yes (WCAG AA on the danger text, both themes) |
+| `e2e-guard.mjs` | yes (refuses an unseeded home) |
+| `e2e-check.mjs`, `e2e-mutations.mjs`, `e2e-bug2.mjs`, `e2e-live.mjs`, `e2e-probe.mjs` | no — they print a transcript. They still exit non-zero when they *crash* (a missing Chrome, a timeout), but a failed ASSERTION is invisible in the exit code, so read their output |
+
 Set `CHROME_PATH` if your Chrome is not at the hard-coded default path.
 
 If you hand-write a call to one of this plugin's routes (the scripts drive the

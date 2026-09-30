@@ -12,6 +12,112 @@ so a change that requires a newer dsh host says so explicitly.
 
 Nothing yet.
 
+## [0.4.7] - 2026-10-01
+
+A review-driven release. Every fix here is regression-guarded by a test that was
+mutation-checked against the OLD code (the new cases were run with the fix
+reverted, and each failed).
+
+### Fixed — data loss: a failed cancel could still be completed by the next boot
+
+- **`cancelPending` now drops the pending marker BEFORE clearing the tombstone,
+  and rewrites it if the registry write fails.** The two writes are durable and
+  the pair is not atomic, so a failure between them stranded "tombstone cleared,
+  marker still set" — the boot sweep then read that surviving marker and deleted
+  the session the user had just cancelled, after the failed cancel told them
+  nothing had happened. Proven by probe before the fix (cancel throws → the
+  session reappears in the list → the next start deletes its files). The
+  marker-first order keeps the registry-failure case retryable, which is what the
+  old order was defending. `finishDeferredDeletion` deliberately keeps the
+  opposite order: there both writes finish the same deletion, and a stranded
+  marker is merely an unfinished delete.
+- **Registry bookkeeping is no longer able to half-book a delete.**
+  `workspace.detachSession` failures are collected as warnings instead of
+  aborting the loop — aborting left the session detached from some workspaces,
+  still archived and with its files intact, i.e. the "ungrouped resurrection"
+  shape. The archive-set write is still allowed to fail the operation, and when
+  an OPEN delete's marker is already durable it now reports
+  `details.queued === true` plus a message saying a restart will finish it.
+- **A throwing liveness seam no longer aborts a confirmed delete.** `readLiveEntry`
+  separates "the seam answered: not live" from "the seam failed: unknown".
+  `deleteSession` treats unknown as cold (files are addressed by id, and refusing
+  would break a delete the user confirmed); the autonomous boot sweep keeps the
+  entry queued, because a seam that is down is exactly when a session may still
+  be open.
+
+### Fixed — a silently empty pending queue
+
+- **`decodePendingQueue` now refuses a body that parses but is not this format**
+  (`{}`, `null`, `[]`, a future v3 shape, `sessionIds: null`). It used to answer
+  `degraded: false` with zero entries — indistinguishable from a legitimately
+  empty queue — and since every writer persists the snapshot it just read, the
+  next write-back would publish `[]` and erase every live marker. A v1 body and a
+  real `{ version, sessionIds: [] }` still read normally.
+- **`deferred/list` no longer re-reads the queue through the TOLERANT reader.**
+  A file that turned torn between the two reads came back as an empty queue with
+  `ok: true`, so a queued session rendered as an ordinary archived row with no
+  feedback.
+
+### Fixed — the menu path failed silently, and focus was lost
+
+- **A second delete while the first is still running now reports itself.** It
+  used to return with no dialog, no toast and no error — on the flagship entry
+  point, which reads as "the plugin is broken" and contradicts this file's own
+  "the menu path must never fail silently" rule. The guard also had a TDZ trap:
+  it read `t` from a destructuring that sits after it.
+- **A confirmed delete no longer drops focus on `<body>`.** The dialog restores
+  focus to its opener, but a confirmed delete unmounts the row that opened it
+  (the list refreshes), so keyboard users were thrown to the top of the document
+  (WCAG 2.4.3, Level A). Focus now lands on a stable neighbour — the next row's
+  delete control, else the section root (`data-sm-section`, made focusable for
+  exactly this) — and the menu path falls back to the session row.
+
+### Fixed — accessibility: danger text did not meet WCAG AA
+
+- **Measured in the live GUI, the row's 12.5px 彻底删除 was 4.24:1** against the
+  dark card surface, below the 4.5:1 floor (the light theme was also marginal at
+  the aliased red-600, 4.50:1). The theme ships no red that clears AA as TEXT on
+  both surfaces, so a `dangerText` token now derives one with `color-mix`
+  (darken for light schemes, lighten for dark ones) from the same red-500 scale
+  entry. `danger` keeps the FILL role (the confirm button's background, toast
+  borders), which was never the failing case.
+
+### Fixed — the e2e scripts could not see what they claimed to test
+
+- **Row discovery goes through `data-row-key="session:<id>"`.** The old
+  `button[aria-label*="的操作"]` plus "climb to a wide element" heuristic matched
+  the **WORKSPACE** row (its label is `工作区“…”的操作`), so `e2e-check`,
+  `e2e-realclick`, `e2e-mutations` and `e2e-live` silently exercised the wrong
+  element and reported `[row] null` — which reads as a fixture problem.
+- **Menu items are matched by substring.** dsh appends shortcut hints
+  (`归档会话` renders as `归档会话Ctrl+Alt+A`), so the `=== '彻底删除'` lookups
+  had already stopped matching.
+- **`e2e-realclick.mjs`'s bug-1 checks are real assertions.** They were
+  `console.log` calls inside a script that the docs listed as one that "can
+  FAIL", so a true regression (a real click opens no dialog) exited 0.
+- README.md, README.zh.md and AGENTS.md now carry an accurate table of which
+  scripts can actually fail, and AGENTS.md records that the e2e fixtures are
+  consumable (`e2e-residue.mjs` deletes the one openable session the seed
+  creates, so a later script's `no restorable session to open` is a spent
+  fixture, not a plugin bug).
+
+### Added — guards for the classes above
+
+- `test/client.render.test.mjs` drives the REAL `rpc` wrapper through
+  `ctx.get('connection')` (`renderSection()` with no `rpc` override) and asserts
+  the structured `error.code`; deleting that assignment used to keep all 165
+  tests green.
+- New host cases: a refused cancel rolls the marker back; a failed queue write
+  during cancel touches neither half; a throwing liveness seam does not abort a
+  delete; a failing detach is a warning; an archive-set failure reports
+  `queued`; a sweep whose tombstone write fails keeps the entry queued.
+- New client cases: the busy guard reports itself; a confirmed delete asks a
+  stable element for focus; the section declares its focus targets.
+- `test/pending-queue.test.mjs` pins the degraded/not-degraded boundary in both
+  directions.
+
+**Test count: 165 → 178 (0 fail, 0 skip).**
+
 ## [0.4.6] - 2026-09-30
 
 ### Added — packaging guards (the "register a new file" rule is now machine-enforced)

@@ -119,22 +119,11 @@ async function visibleError() {
 }
 async function sidebarTitles() {
   return page.evaluate(() => {
-    const out = []
-    for (const b of document.querySelectorAll('button[aria-label]')) {
-      const label = b.getAttribute('aria-label') || ''
-      if (label.includes('的操作') && !label.includes('工作区')) {
-        let node = b.parentElement
-        while (node && node !== document.body) {
-          const r = node.getBoundingClientRect()
-          if (r.width > 120 && r.height > 20) {
-            out.push((node.textContent || '').replace(/\s+/g, ' ').slice(0, 70))
-            break
-          }
-          node = node.parentElement
-        }
-      }
-    }
-    return out
+    // `data-row-key` is the official hook: a SESSION row carries no
+    // `aria-label` at all (only workspace rows do), so the old label + geometry
+    // scan reported nothing about the sessions this script drives.
+    return [...document.querySelectorAll('[data-row-key]')].map((row) =>
+      (row.textContent || '').replace(/\s+/g, ' ').slice(0, 70))
   })
 }
 

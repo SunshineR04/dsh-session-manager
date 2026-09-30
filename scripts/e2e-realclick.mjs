@@ -27,39 +27,61 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
 await sleep(9000)
 
-// find the session row rect
+// find the session row through the official `data-row-key` hook: the old
+// aria-label + geometry climb matched the WORKSPACE row (whose label is
+// "工作区“…”的操作"), so this script never reached its own assertions.
+//
+// Pick a row that HAS a menu trigger — an empty/new session row renders none
+// (measured: `新会话` → 0 buttons, a titled row → 3).
 const rowRect = await page.evaluate(() => {
-  const buttons = [...document.querySelectorAll('button[aria-label]')]
-  const ellipsis = buttons.find((b) => {
-    const label = b.getAttribute('aria-label') || ''
-    return label.includes('的操作') && !label.includes('工作区')
-  })
-  if (!ellipsis) return null
-  let node = ellipsis.parentElement
-  while (node && node !== document.body) {
-    const r = node.getBoundingClientRect()
-    if (r.width > 120 && r.height > 20) return { x: r.x, y: r.y, w: r.width, h: r.height }
-    node = node.parentElement
+  const rows = [...document.querySelectorAll('[data-row-key^="session:"]')]
+  const usable = rows.find((r) => r.querySelectorAll('button').length > 0) ?? rows[0]
+  if (usable === undefined) return null
+  const r = usable.getBoundingClientRect()
+  // The TITLE alone, from a child element — never `row.textContent`, which
+  // concatenates the relative-date badge (`…archive21天`) and therefore never
+  // matches the trigger's `会话“<title>”的操作` label.
+  const firstChild = [...usable.children].map((child) => (child.textContent || '').trim()).find((text) => text.length > 0) ?? ''
+  return {
+    x: r.x, y: r.y, w: r.width, h: r.height,
+    key: usable.getAttribute('data-row-key'),
+    title: firstChild.slice(0, 60),
   }
-  return null
 })
 console.log('[row]', JSON.stringify(rowRect))
 if (rowRect === null) process.exit(1)
 
-// real hover on the row
-await page.mouse.move(rowRect.x + rowRect.w / 2, rowRect.y + rowRect.h / 2)
-await sleep(800)
-// real click on the ellipsis
-const btn = await page.evaluate(() => {
-  const buttons = [...document.querySelectorAll('button[aria-label]')]
-  const ellipsis = buttons.find((b) => {
-    const label = b.getAttribute('aria-label') || ''
-    return label.includes('的操作') && !label.includes('工作区') && b.offsetParent !== null
-  })
-  if (!ellipsis) return null
-  const r = ellipsis.getBoundingClientRect()
+// OPEN the session first: a row's action cluster is not in the DOM until the row
+// is both opened and hovered, so probing it on a fresh row reports "no trigger"
+// and looks like a fixture failure.
+await page.mouse.click(rowRect.x + 40, rowRect.y + rowRect.h / 2)
+await sleep(2500)
+// real hover on the row (`page.hover`, so the row's CSS hover state settles)
+await page.hover(`[data-row-key="${rowRect.key}"]`)
+await sleep(900)
+// real click on the row's own menu trigger, picked by the official
+// `会话“<title>”的操作` label — the button is not reachable from the row element.
+// POLL for it: opening a session materialises the row and its action cluster on
+// the host round-trip, so one probe can land too early and read as "no menu".
+const findTrigger = (title) => page.evaluate((needle) => {
+  const candidates = [...document.querySelectorAll('button[aria-label]')]
+    .filter((b) => (b.getAttribute('aria-label') || '').startsWith('会话'))
+  const trigger = candidates.find((b) => needle.length > 0 && (b.getAttribute('aria-label') || '').includes(needle))
+    ?? (candidates.length === 1 ? candidates[0] : undefined)
+  if (trigger === undefined) return null
+  const r = trigger.getBoundingClientRect()
+  if (r.width === 0 && r.height === 0) return null
   return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
-})
+}, title)
+let btn = null
+const deadline = Date.now() + 8000
+while (btn === null && Date.now() < deadline) {
+  btn = await findTrigger(rowRect.title)
+  if (btn === null) {
+    await page.hover(`[data-row-key="${rowRect.key}"]`).catch(() => {})
+    await sleep(500)
+  }
+}
 if (btn === null) {
   console.log('[ellipsis] not visible')
   process.exit(1)
@@ -68,10 +90,12 @@ await page.mouse.click(btn.x, btn.y)
 await sleep(1200)
 await page.screenshot({ path: `${outDir}/r1-menu.png` })
 
-// locate the red item rect
+// locate the red item rect. SUBSTRING matching: dsh appends shortcut hints to
+// menu labels, so `=== '彻底删除'` stopped matching — and this lookup is an
+// exit(1) path, which made a fixture failure look like a caught regression.
 const redRect = await page.evaluate(() => {
   const items = [...document.querySelectorAll('[role="menuitem"]')]
-  const red = items.find((i) => i.textContent.trim() === '彻底删除' || i.textContent.trim() === 'Delete permanently')
+  const red = items.find((i) => /彻底删除|Delete permanently/.test(i.textContent || ''))
   if (!red) return null
   const r = red.getBoundingClientRect()
   return { x: r.x, y: r.y, w: r.width, h: r.height, text: red.textContent.trim() }
@@ -88,10 +112,17 @@ await page.mouse.move(redRect.x + redRect.w / 2, redRect.y + redRect.h / 2)
 await sleep(600)
 const stillThere = await page.evaluate(() => {
   const items = [...document.querySelectorAll('[role="menuitem"]')]
-  const red = items.find((i) => i.textContent.trim() === '彻底删除' || i.textContent.trim() === 'Delete permanently')
-  return red ? true : false
+  return items.some((i) => /彻底删除|Delete permanently/.test(i.textContent || ''))
 })
 console.log('[red] still in DOM after hover:', stillThere)
+// bug 1: the row used to disappear when the pointer entered the popup. That is a
+// REGRESSION, so it must fail the run — a console line nobody reads is not a test.
+if (stillThere !== true) {
+  console.error('FAIL: the red delete item vanished when the mouse entered the menu (bug 1 reproduced)')
+  await page.screenshot({ path: `${outDir}/r2-hover-red.png` })
+  await browser.close()
+  process.exit(1)
+}
 await page.screenshot({ path: `${outDir}/r2-hover-red.png` })
 await page.mouse.down()
 await sleep(150)
@@ -104,6 +135,15 @@ const overlayInfo = await page.evaluate(() => {
 })
 console.log('[overlay]', JSON.stringify(overlayInfo))
 await page.screenshot({ path: `${outDir}/r3-after-realclick.png` })
+
+// bug 1's other half: a real click on the row must open the confirm dialog. This
+// used to be logged and skipped, so the script exited 0 exactly when the feature
+// was broken.
+if (overlayInfo === null) {
+  console.error('FAIL: a real click on the red delete item opened no confirm dialog (bug 1 reproduced)')
+  await browser.close()
+  process.exit(1)
+}
 
 if (overlayInfo !== null) {
   // cancel via real click on the cancel button

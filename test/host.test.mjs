@@ -444,6 +444,144 @@ test('deferred/cancel reports a vanished workspace instead of failing', async ()
   assert.deepEqual(state.archivedSessionIds, [], 'the cancel still succeeds')
 })
 
+test('a cancel the registry refuses puts the marker back, so no boot can finish it', async () => {
+  // The marker drop and the tombstone clear are separate durable writes, so the
+  // pair is not atomic. This is the ordering that must never be reachable:
+  // "tombstone cleared, marker still set" means the next boot's sweep reads the
+  // surviving marker and deletes the very session the user just cancelled —
+  // after telling them the cancel FAILED. Proven by probe before the fix; the
+  // assertion below is what keeps it fixed.
+  const fixture = await makeFixture()
+  const { ctx, headers, state, registry } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  const manager = createSessionManager(ctx, {})
+  const workspace = registry.list()[0]
+  workspace.sessionIds.splice(0, workspace.sessionIds.length)
+  state.archivedSessionIds = [SESSION_ID]
+  await mkdir(join(fixture.home, 'storages'), { recursive: true })
+  await writeFile(
+    manager.pendingFile(),
+    JSON.stringify({ version: 2, sessionIds: [SESSION_ID], detached: { [SESSION_ID]: ['ws-1'] } }),
+    'utf8',
+  )
+
+  // The registry refuses the un-archive, which happens AFTER the marker drop.
+  registry.unarchiveSession = async () => { throw new Error('registry down') }
+  await assert.rejects(manager.cancelPending(SESSION_ID), (error) => {
+    assert.equal(error.code, 'session-manager/internal')
+    assert.match(error.message, /NOT restored/)
+    assert.equal(error.details.rolledBack, true, 'the marker rewrite must be reported')
+    return true
+  })
+
+  assert.deepEqual(await manager.readPending(), [SESSION_ID], 'the marker is rolled back, so the next boot still sees a queued deletion')
+  assert.ok(state.archivedSessionIds.includes(SESSION_ID), 'and the tombstone is still set, so the session stays hidden')
+})
+
+test('a failed queue write during cancel touches neither the tombstone nor the marker', async () => {
+  // The complementary half of the ordering rule: when the marker cannot be
+  // dropped, the tombstone must not be cleared either — the entry stays exactly
+  // as queued as it was, and the cancel is simply retryable.
+  //
+  // The failure is injected by occupying the writer's temp path
+  // (`<queue>.<pid>.tmp`): `writePending` mkdirs the parent (a no-op on an
+  // existing directory) and then writeFile's that exact path, so it throws the
+  // way a full or read-only disk does — deterministically, without mocking the
+  // `node:fs/promises` binding this module imports directly.
+  const fixture = await makeFixture()
+  const { ctx, headers, state, registry } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  const manager = createSessionManager(ctx, {})
+  const workspace = registry.list()[0]
+  workspace.sessionIds.splice(0, workspace.sessionIds.length)
+  state.archivedSessionIds = [SESSION_ID]
+  const queueFile = manager.pendingFile()
+  await mkdir(join(fixture.home, 'storages'), { recursive: true })
+  await writeFile(queueFile, JSON.stringify({ version: 2, sessionIds: [SESSION_ID], detached: { [SESSION_ID]: ['ws-1'] } }), 'utf8')
+  await mkdir(`${queueFile}.${process.pid}.tmp`, { recursive: true })
+
+  await assert.rejects(manager.cancelPending(SESSION_ID), /EISDIR|EPERM|EACCES/)
+  assert.deepEqual(await manager.readPending(), [SESSION_ID], 'the marker is untouched')
+  assert.ok(state.archivedSessionIds.includes(SESSION_ID), 'the tombstone was never cleared')
+})
+
+test('a throwing liveness seam does not abort a delete, and is not read as "open"', async () => {
+  // A destructive operation the user confirmed must not be broken by a
+  // diagnostic read. "Unknown" is treated as cold HERE (there is no tombstone
+  // and no marker to invent); the boot sweep deliberately does the opposite —
+  // see the test named "a failed liveness check leaves the entry queued".
+  const fixture = await makeFixture()
+  const { ctx, headers, state } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  ctx.services.sessions = { get: () => { throw new Error('liveness seam down') } }
+  const manager = createSessionManager(ctx, {})
+
+  const result = await manager.deleteSession(SESSION_ID)
+  assert.equal(result.deleted, true, 'the delete still completes')
+  assert.equal(result.openAtDelete, undefined, 'a failed liveness read is not an open session')
+  assert.deepEqual(await manager.readPending(), [], 'and it leaves no pending marker behind')
+  assert.deepEqual(state.archivedSessionIds, [], 'nor a tombstone')
+})
+
+test('an archive-set failure on an open delete reports that the deletion is already queued', async () => {
+  // The marker is durable before the archive-set write, so the next start WILL
+  // finish this deletion. Reporting only "it failed" showed the user a session
+  // that looks alive while it is queued for removal, so the failure has to carry
+  // both facts.
+  const fixture = await makeFixture()
+  const { ctx, headers, registry } = makeCtx({ fixture, liveSessions: [[SESSION_ID, { id: SESSION_ID }]] })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  const manager = createSessionManager(ctx, {})
+  registry.archiveSession = async () => { throw new Error('registry write refused') }
+
+  await assert.rejects(manager.deleteSession(SESSION_ID), (error) => {
+    assert.equal(error.code, 'session-manager/internal')
+    assert.equal(error.details.queued, true, 'the caller must be told a restart will complete it')
+    assert.match(error.message, /queued and will be completed on the next dsh start/)
+    return true
+  })
+  assert.deepEqual(await manager.readPending(), [SESSION_ID], 'and the claim is true: the marker is on disk')
+})
+
+test('a failing workspace detach is a warning, not an abort that half-books the session', async () => {
+  // Throwing out of the detach loop left the session detached from some
+  // workspaces, still archived and with its files intact — the "ungrouped
+  // resurrection" shape this plugin exists to prevent.
+  const fixture = await makeFixture()
+  const { ctx, headers, registry } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  registry.list()[0].detachSession = async () => { throw new Error('detach exploded') }
+  const manager = createSessionManager(ctx, {})
+
+  const result = await manager.deleteSession(SESSION_ID)
+  assert.equal(result.deleted, true, 'the confirmed delete still completes')
+  assert.equal(result.warnings.length, 1)
+  assert.match(result.warnings[0], /could not be detached from workspace "ws-1"/)
+  assert.match(result.warnings[0], /detach exploded/)
+})
+
+test('a boot sweep whose tombstone write fails keeps the entry queued', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers, state, registry } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  state.archivedSessionIds = [SESSION_ID]
+  const manager = createSessionManager(ctx, {})
+  await mkdir(fixture.storagesRoot, { recursive: true })
+  await writeFile(manager.pendingFile(), JSON.stringify({ version: 2, sessionIds: [SESSION_ID], detached: {} }), 'utf8')
+
+  registry.unarchiveSession = async () => { throw new Error('registry down') }
+  const swept = await manager.sweepPending()
+  assert.deepEqual(swept.deleted, [], 'nothing was reported as finished')
+  assert.deepEqual(swept.remaining, [SESSION_ID], 'the entry stays queued for the next sweep')
+  assert.deepEqual(await manager.readPending(), [SESSION_ID], 'and the marker was never dropped')
+})
+
 test('a v1 pending queue still reads, with no workspace record to restore', async () => {
   const fixture = await makeFixture()
   const { ctx, headers } = makeCtx({ fixture })

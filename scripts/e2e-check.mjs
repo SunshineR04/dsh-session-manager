@@ -55,43 +55,75 @@ console.log(`[roster] our client module present: ${roster.has} (${roster.total} 
 await snapshot('01-boot')
 
 // ── 1. three-dot menu via real mouse (CSS reveals row actions on hover) ────
+//
+// Row identity comes from `data-row-key` — the official hook — not from an
+// aria-label plus a geometry climb. The old guess matched the WORKSPACE row
+// (its label is "工作区“…”的操作"), so this script silently tested nothing.
+//
+// Pick a row that HAS a menu trigger: an empty/new session row renders no action
+// buttons at all (measured on the live sidebar: `新会话` → 0 buttons, a titled row
+// → 3), so taking the first session row asserts against a row that cannot have a
+// menu.
 const rowRect = await page.evaluate(() => {
-  const buttons = [...document.querySelectorAll('button[aria-label]')]
-  const ellipsis = buttons.find((b) => {
-    const label = b.getAttribute('aria-label') || ''
-    return label.includes('的操作') && !label.includes('工作区')
-  })
-  if (!ellipsis) return null
-  // climb from the ellipsis button to the wide session-row element
-  let node = ellipsis.parentElement
-  let row = null
-  while (node && node !== document.body) {
-    const r = node.getBoundingClientRect()
-    if (r.width > 120 && r.height > 20) { row = node; break }
-    node = node.parentElement
+  const rows = [...document.querySelectorAll('[data-row-key^="session:"]')]
+  const usable = rows.find((r) => r.querySelectorAll('button').length > 0) ?? rows[0]
+  if (usable === undefined) return null
+  const r = usable.getBoundingClientRect()
+  // The TITLE alone, from a child element — never `row.textContent`, which
+  // concatenates the relative-date badge (`…archive21天`). The trigger's label
+  // names only the title (`会话“<title>”的操作`), so a concatenated string never
+  // matches and the row reads as "no menu trigger".
+  const firstChild = [...usable.children].map((child) => (child.textContent || '').trim()).find((text) => text.length > 0) ?? ''
+  return {
+    x: r.x, y: r.y, w: r.width, h: r.height,
+    key: usable.getAttribute('data-row-key'),
+    title: firstChild.slice(0, 60),
   }
-  if (!row) return null
-  const r = row.getBoundingClientRect()
-  return { x: r.x, y: r.y, w: r.width, h: r.height, hasFiber: Object.keys(ellipsis).some((k) => k.startsWith('__reactFiber$')) }
 })
 console.log('[row]', JSON.stringify(rowRect))
 if (rowRect !== null) {
-  const cx = rowRect.x + rowRect.w / 2
-  const cy = rowRect.y + rowRect.h / 2
-  await page.mouse.move(cx, cy)
-  await sleep(700)
+  // OPEN the session first: reading a row's action cluster needs the ROW OPENED
+  // and hovered — on an unopened (or unselected) row the cluster is not merely
+  // invisible, it is not in the DOM at all, which is why a "buttons.length === 0"
+  // measurement used to look like a broken fixture.
+  await page.mouse.click(rowRect.x + 40, rowRect.y + rowRect.h / 2)
+  await sleep(2500)
+  // `page.hover` (not a bare mouse.move): the cluster is revealed by the row's
+  // own CSS hover state, and a raw move does not always settle it in headless.
+  await page.hover(`[data-row-key="${rowRect.key}"]`)
+  await sleep(900)
   await snapshot('02-row-hover')
-  // find the now-visible ellipsis button and click it with the real mouse
-  const btnRect = await page.evaluate(() => {
-    const buttons = [...document.querySelectorAll('button[aria-label]')]
-    const ellipsis = buttons.find((b) => {
-      const label = b.getAttribute('aria-label') || ''
-      return label.includes('的操作') && !label.includes('工作区') && b.offsetParent !== null
-    })
-    if (!ellipsis) return null
-    const r = ellipsis.getBoundingClientRect()
-    return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
-  })
+  // The trigger is identified by its OFFICIAL label prefix (`会话…的操作`) and
+  // scoped by TITLE: the button is not reachable from the `data-row-key` element
+  // by `querySelectorAll` (its rowActions span sits beside it), and with more
+  // than one session row open, the first candidate is a real wrong answer.
+  //
+  // POLL for it: opening a session materialises its row and its action cluster on
+  // the host round-trip, so a single probe can land before the cluster exists —
+  // which then reads as "this row has no menu", the exact false negative this
+  // script already suffered from once.
+  const findTrigger = (title) => page.evaluate((needle) => {
+    const candidates = [...document.querySelectorAll('button[aria-label]')]
+      .filter((b) => (b.getAttribute('aria-label') || '').startsWith('会话'))
+    const trigger = candidates.find((b) => needle.length > 0 && (b.getAttribute('aria-label') || '').includes(needle))
+      ?? (candidates.length === 1 ? candidates[0] : undefined)
+    if (trigger === undefined) return null
+    const r = trigger.getBoundingClientRect()
+    if (r.width === 0 && r.height === 0) return null
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2, label: trigger.getAttribute('aria-label'), candidates: candidates.length }
+  }, title)
+
+  let btnRect = null
+  const deadline = Date.now() + 8000
+  while (btnRect === null && Date.now() < deadline) {
+    btnRect = await findTrigger(rowRect.title)
+    if (btnRect === null) {
+      // Re-hover each round: the cluster is revealed by the row's hover state, and
+      // a re-render (the session opening) can drop it again.
+      await page.hover(`[data-row-key="${rowRect.key}"]`).catch(() => {})
+      await sleep(500)
+    }
+  }
   console.log('[ellipsis]', JSON.stringify(btnRect))
   if (btnRect !== null) {
     await page.mouse.click(btnRect.x, btnRect.y)
@@ -99,13 +131,16 @@ if (rowRect !== null) {
     await snapshot('03-session-menu')
     const menuItems = await page.evaluate(() => [...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent.trim()))
     console.log('[menu] items:', JSON.stringify(menuItems))
-    const hasRedDelete = menuItems.some((item) => item === '彻底删除' || item === 'Delete permanently')
+    // SUBSTRING, not equality: dsh appends shortcut hints to these labels
+    // (`归档会话` renders as `归档会话Ctrl+Alt+A`), so an exact match stopped
+    // matching after an upstream change — with no error, just a missing row.
+    const hasRedDelete = menuItems.some((item) => item.includes('彻底删除') || item.includes('Delete permanently'))
     console.log(`[menu] red delete item present: ${hasRedDelete}`)
 
     if (hasRedDelete) {
       const clicked = await page.evaluate(() => {
         const items = [...document.querySelectorAll('[role="menuitem"]')]
-        const target = items.find((item) => item.textContent.trim() === '彻底删除' || item.textContent.trim() === 'Delete permanently')
+        const target = items.find((item) => item.textContent.includes('彻底删除') || item.textContent.includes('Delete permanently'))
         if (!target) return false
         target.click()
         return true

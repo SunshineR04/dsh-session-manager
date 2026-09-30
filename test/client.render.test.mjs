@@ -191,8 +191,9 @@ function useSessionsService(service) {
 /**
  * Mount the settings section with the props PRODUCTION injects — taken from the
  * registered spec's own inject face, so the real `refreshUntilGone` closure takes
- * part instead of a test double. Only `rpc` is always overridden; the remaining
- * overrides exist for the tests that need a different fixture.
+ * part instead of a test double. `rpc` is overridden when one is given; call it
+ * with NO arguments to keep the production wrapper (the `ctx.get('connection')`
+ * path) and drive that instead.
  *
  * An override patches BOTH the value and the LIVE getter: the inject face
  * carries `getSessions`/`getWorkspaces` because the renderer caches `inject()`
@@ -203,7 +204,10 @@ async function renderSection(rpc, sessionsOverride, workspacesOverride, extraPro
   const base = sectionSpec().inject()
   const props = {
     ...base,
-    rpc,
+    // Only spread the override when one was supplied: `{ ...base, rpc: undefined }`
+    // would ERASE the production wrapper, which is exactly what the tests that
+    // drive the real one must not do.
+    ...(rpc === undefined ? {} : { rpc }),
     ...(sessionsOverride === undefined ? {} : { sessions: sessionsOverride, getSessions: () => sessionsOverride }),
     ...(workspacesOverride === undefined ? {} : { workspaces: workspacesOverride, getWorkspaces: () => workspacesOverride }),
     ...(extraProps ?? {}),
@@ -1001,6 +1005,126 @@ test('the menu item opens one dialog at a time', async () => {
   })
 })
 
+const confirmButtonIn = (overlay) => [...overlay.querySelectorAll('button')]
+  // The harness translates with an identity function (`t: (key) => key`), so the
+  // confirm button reads `confirm`, not the localized label.
+  .find((b) => /^(删除|Delete|confirm)$/.test((b.textContent || '').trim()))
+
+test('a second delete while the first is still running says so instead of doing nothing', async () => {
+  // `menuConfirmBusy` covers the whole confirm → delete → refresh window, and a
+  // select landing inside it used to `return` with no dialog, no toast and no
+  // error. Verified by probe against the real component: the flagship entry
+  // point silently ignored the click, which reads as "the plugin is broken" —
+  // and this file's own rule is that the menu path must never fail silently.
+  //
+  // `menuConfirmBusy` is MODULE-level (shared by every menu row), so this test
+  // must leave it false: the in-flight delete is released through `releaseDelete`
+  // in the finally block, otherwise every later menu test would be answered with
+  // the busy toast instead of a dialog.
+  const calls = []
+  let releaseDelete
+  const heldDelete = new Promise((resolve) => { releaseDelete = resolve })
+  const rpc = (endpoint, payload) => {
+    calls.push([endpoint, payload && payload.sessionId])
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
+    if (endpoint === 'ping') return Promise.resolve({ version: '0.4.6', menuDeleteAvailable: true })
+    // Held open: the first delete stays in flight while the second is attempted.
+    if (endpoint === 'delete') return heldDelete.then(() => ({ sessionId: payload.sessionId, deleted: true }))
+    return new Promise(() => {})
+  }
+  await withLayout(async () => {
+    const first = await renderMenuItem({ rpc, sessionId: ID, refreshAfterDelete: async () => true })
+    const second = await renderMenuItem({ rpc, sessionId: TOMBSTONE, refreshAfterDelete: async () => true })
+    try {
+      // Start + confirm the first delete through the same path a user takes.
+      await act(async () => { first.item().click(); await settle() })
+      const confirmButton = confirmButtonIn(confirmOverlay())
+      assert.ok(confirmButton, 'the first dialog is up')
+      await act(async () => { confirmButton.click(); await settle() })
+      assert.ok(calls.some(([endpoint]) => endpoint === 'delete'), 'the first delete left for the host')
+
+      clearToasts()
+      // The second menu row is a DIFFERENT mounted component sharing the same
+      // module closure: the second session's menu, opened while the first delete
+      // is still in flight.
+      await act(async () => { second.item().click(); await settle() })
+
+      assert.equal(document.querySelectorAll('[data-sm-confirm]').length, 0, 'no second dialog is stacked')
+      assert.equal(calls.filter(([endpoint]) => endpoint === 'delete').length, 1, 'and no second delete is issued')
+      assert.ok(toasts().some((node) => node.textContent.includes('menuBusy')),
+        `the second attempt is REPORTED, not swallowed (toasts: ${JSON.stringify(toasts().map((n) => n.textContent))})`)
+      assert.ok(!calls.some(([endpoint, sessionId]) => endpoint === 'delete' && sessionId === TOMBSTONE), 'the second session is untouched')
+    } finally {
+      // Release the held delete FIRST (and let it drain), so the module-level
+      // busy flag is false again before the next test runs.
+      releaseDelete()
+      await act(async () => { await settle(); await settle() })
+      await second.cleanup()
+      await first.cleanup()
+    }
+  })
+})
+
+test('a confirmed delete ASKS a stable element for focus instead of dropping it on <body>', async () => {
+  // The dialog restores focus to its opener on close, but a CONFIRMED delete
+  // unmounts the row that opened it (the list refreshes), so the restore landed
+  // on <body> — measured in the real GUI, and a WCAG 2.4.3 (Level A) failure.
+  //
+  // jsdom does not move `document.activeElement` for a programmatic `.focus()`
+  // on these elements, so asserting on activeElement here would be a test of
+  // jsdom rather than of the plugin. What IS observable — and what the fix
+  // actually does — is that the declared landing target is asked for focus, in
+  // preference to the opener. `document.activeElement` after a real click is
+  // verified in the browser instead (see scripts/e2e-focus.mjs).
+  const { sess, ws } = bulkFixture()
+  const calls = []
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(idleRpc(calls), sess, ws)
+    try {
+      const opener = rowDeleteButton(container)
+      assert.ok(opener, 'the row delete control renders')
+
+      // Count the focus requests the landing target receives.
+      const target = container.querySelector('[data-sm-section]')
+      assert.ok(target, 'the section declares itself as the landing target')
+      let focused = 0
+      const realFocus = target.focus.bind(target)
+      target.focus = () => { focused += 1; realFocus() }
+
+      await act(async () => { opener.click(); await settle() })
+      const confirmButton = confirmButtonIn(confirmOverlay())
+      assert.ok(confirmButton, 'the confirmation dialog is up')
+      // Instrument the delete button of EVERY row, not just the first: after the
+      // refresh the surviving row's control is the intended landing spot, and it
+      // may be a different DOM node than the opener.
+      const hits = []
+      for (const button of container.querySelectorAll('[data-sm-row-delete], [data-sm-bulk-delete], [data-sm-section]')) {
+        const real = button.focus.bind(button)
+        button.focus = () => { hits.push(button.getAttribute('data-sm-row-delete') === '1' ? 'row-delete' : button.getAttribute('data-sm-section') === '1' ? 'section' : 'bulk'); real() }
+      }
+      await act(async () => { confirmButton.click(); await settle() })
+      await act(async () => { await settle() })
+
+      // The row is gone (the delete landed) and the landing target was asked.
+      assert.equal(calls.filter(([endpoint]) => endpoint === 'delete').length, 1, 'the delete actually ran')
+      assert.ok(hits.length > 0,
+        `focus was handed to a stable element (dialog still open: ${confirmOverlay() !== null}; activeElement: ${document.activeElement === null ? 'null' : document.activeElement.tagName})`)
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('the settings section exposes a stable focus target for the after-delete landing', async () => {
+  const { container, cleanup } = await renderSection(idleRpc([]))
+  try {
+    assert.ok(container.querySelector('[data-sm-section]'), 'the section root is addressable')
+    assert.ok(container.querySelector('[data-sm-row-delete]'), 'and each row delete control is too')
+  } finally {
+    await cleanup()
+  }
+})
+
 // ── the refresh seam, and the dialog/keyboard contract ----------------------
 //
 // The plugin used to call `sessions.refreshList()`, a name no published version
@@ -1725,6 +1849,92 @@ test('host warnings and a failed refresh both reach the user', async () => {
       await cleanup()
     }
   })
+})
+
+test('the REAL rpc wrapper attaches the host error code (structural matching, not message scraping)', async () => {
+  // Every other test here overrides the `rpc` prop, so the wrapper that actually
+  // talks to the connection service had ZERO coverage: `error.code = …` could be
+  // deleted and 165 tests stayed green (verified by mutation). It is the
+  // implementation of the documented "domain errors are matched structurally"
+  // contract, and `isRunningError(error)` reads exactly that property — so drive
+  // it through the same connection seam production uses, with the rpc prop left
+  // alone.
+  const calls = []
+  const previous = services.connection
+  services.connection = {
+    rpc: {
+      async call(channel, method, payload) {
+        calls.push({ channel, method, payload })
+        // The host's failure envelope, verbatim (see `errorEnvelope`) — for one
+        // endpoint; every other call answers with a shapeless result so the
+        // transport-shaped branch is exercised too.
+        if (method === 'session-manager/deferred/cancel') {
+          return { ok: false, error: { code: 'session/running', message: 'session is running', details: {} } }
+        }
+        return undefined
+      },
+    },
+  }
+  try {
+    // The wrapper is exposed on the inject face, so it can be called DIRECTLY.
+    // Asserting on its throw (not on a component's rendering) is the whole
+    // point: `isRunningError` has a message-scraping fallback, so any
+    // UI-level assertion stays green when the code is dropped — the fallback
+    // only fails to save you the day the host phrase or the locale changes,
+    // which is exactly the regression this guards.
+    const realRpc = sectionSpec().inject().rpc
+    assert.equal(typeof realRpc, 'function', 'the inject face carries the production wrapper')
+
+    const failure = await realRpc('deferred/cancel', { sessionId: ID }).then(
+      () => null,
+      (error) => error,
+    )
+    assert.notEqual(failure, null, 'a host failure envelope must reject')
+    assert.equal(failure.code, 'session/running', 'STRUCTURAL matching: the host code is copied onto the thrown error')
+    // The message keeps the code readable for logs, but nothing may depend on it.
+    assert.match(failure.message, /session\/running/)
+
+    // A result that is not a failure envelope at ALL carries no code: it must
+    // fall back to the localized transport message rather than interpolating
+    // `undefined`.
+    const transportFailure = await realRpc('list', {}).then(() => null, (error) => error)
+    assert.equal(transportFailure.code, undefined, 'no domain code in a shapeless answer')
+    assert.ok(!/undefined/.test(transportFailure.message), 'and no `undefined` leaks into the message')
+
+    // The component path still works end to end through the same seam.
+    const { container, cleanup } = await renderSection()
+    try {
+      assert.ok(calls.length > 0, 'the real wrapper reached the connection service')
+      for (const call of calls) {
+        assert.equal(call.channel, '/api', 'every call goes through the plugin channel')
+        assert.match(call.method, /^session-manager\/[a-z/]+$/, 'and addresses a real endpoint, namespaced')
+      }
+      assert.ok(calls.some((call) => call.method === 'session-manager/ping'), 'the header ping went through the wrapper too')
+      assert.ok(container.textContent.includes('rpcUnreachable'), 'a failed host call surfaces as unreachable, not as a raw message')
+    } finally {
+      await cleanup()
+    }
+  } finally {
+    services.connection = previous
+  }
+})
+
+test('a transport-shaped failure without an error object still reports the localized fallback', async () => {
+  // The other branch of the same wrapper: `result` is not `{ ok:false, error }`
+  // at all, so there is no code to attach and the message must be localized
+  // rather than interpolating `undefined`.
+  const previous = services.connection
+  services.connection = { rpc: { async call() { return undefined } } }
+  try {
+    const { container, cleanup } = await renderSection()
+    try {
+      assert.ok(container.textContent.includes('rpcUnreachable'), 'a shapeless answer is treated as an unreachable host')
+    } finally {
+      await cleanup()
+    }
+  } finally {
+    services.connection = previous
+  }
 })
 
 test('the unreachable-host guidance appears when the ping fails', async () => {

@@ -79,40 +79,34 @@ await sleep(9000)
 await shot('m01-boot')
 
 // ── 1. red menu item computed style ─────────────────────────────────────────
+// Row identity comes from the official `data-row-key` hook, not an aria-label +
+// geometry climb: that guess matched the WORKSPACE row ("工作区“…”的操作"), so
+// this block silently did nothing.
 const rowRect = await page.evaluate(() => {
-  const buttons = [...document.querySelectorAll('button[aria-label]')]
-  const ellipsis = buttons.find((b) => {
-    const label = b.getAttribute('aria-label') || ''
-    return label.includes('的操作') && !label.includes('工作区')
-  })
-  if (!ellipsis) return null
-  let node = ellipsis.parentElement
-  while (node && node !== document.body) {
-    const r = node.getBoundingClientRect()
-    if (r.width > 120 && r.height > 20) return { x: r.x, y: r.y, w: r.width, h: r.height }
-    node = node.parentElement
-  }
-  return null
+  const row = document.querySelector('[data-row-key^="session:"]')
+  if (row === null) return null
+  const r = row.getBoundingClientRect()
+  return { x: r.x, y: r.y, w: r.width, h: r.height, key: row.getAttribute('data-row-key') }
 })
 if (rowRect !== null) {
   await page.mouse.move(rowRect.x + rowRect.w / 2, rowRect.y + rowRect.h / 2)
   await sleep(700)
-  const btn = await page.evaluate(() => {
-    const buttons = [...document.querySelectorAll('button[aria-label]')]
-    const ellipsis = buttons.find((b) => {
-      const label = b.getAttribute('aria-label') || ''
-      return label.includes('的操作') && !label.includes('工作区') && b.offsetParent !== null
-    })
-    if (!ellipsis) return null
+  const btn = await page.evaluate((key) => {
+    const row = document.querySelector(`[data-row-key="${key}"]`)
+    if (row === null) return null
+    const buttons = [...row.querySelectorAll('button')].filter((b) => b.offsetParent !== null)
+    const ellipsis = buttons[buttons.length - 1]
+    if (ellipsis === undefined) return null
     const r = ellipsis.getBoundingClientRect()
     return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
-  })
+  }, rowRect.key)
   if (btn !== null) {
     await page.mouse.click(btn.x, btn.y)
     await sleep(1100)
     const style = await page.evaluate(() => {
       const items = [...document.querySelectorAll('[role="menuitem"]')]
-      const red = items.find((i) => i.textContent.trim() === '彻底删除' || i.textContent.trim() === 'Delete permanently')
+      // Substring: dsh appends shortcut hints to these labels.
+      const red = items.find((i) => /彻底删除|Delete permanently/.test(i.textContent || ''))
       if (!red) return null
       const cs = getComputedStyle(red)
       return { color: cs.color, background: cs.backgroundColor, fontSize: cs.fontSize }

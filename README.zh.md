@@ -220,18 +220,31 @@ node scripts/e2e-seed.mjs <e2e-home> ~/.dsh          # 1. 播种隔离测试 HOM
 node scripts/e2e-check.mjs <打印出的带 token 的 URL>  # 3. 只读检查：三点菜单/设置页
 node scripts/e2e-mutations.mjs <URL> <e2e-home>       # 4. 闭环：恢复→归档→彻底删除
 node scripts/e2e-residue.mjs <URL> --home <e2e-home>  # 5. 残留验收：两个视图都不该有该行
+node scripts/e2e-contrast.mjs <URL> <e2e-home>        # 6. 危险红字在明暗两套主题下的 WCAG AA 对比度
 ```
+
+⚠ 第 6 步要求该 home 的**归档集非空**（seed 会造一个已归档会话），否则它因为无可测量
+而 exit 2。它是只读的：不归档、不删除任何会话。
 
 ⚠ 第 4、5 步会**真的删除会话**：`--home`（或第二个参数）现在必须有值，且该 home
 必须带 `scripts/e2e-seed.mjs` 写下的标记文件——缺少标记（或指向真实 `~/.dsh`）时脚本
 直接拒绝运行，因为只凭一个 URL 无法证明它背后是哪个 home（见 `scripts/e2e-guard.mjs`）。
 
 其余脚本是**诊断工具，不是验收测试**：`e2e-bug2.mjs` 与 `e2e-live.mjs` 复现已修
-的现场 bug（两者都会真删会话，都有守卫），`e2e-realclick.mjs` 与 `e2e-probe.mjs`
-是一次性的 DOM 侦察。只有 `e2e-residue.mjs`、`e2e-dialog-style.mjs`、
-`e2e-realclick.mjs` 和 guard 本身**会失败**——其余脚本无论发生什么都打印一份
-过程记录并以 0 退出，所以请看它的输出，而不是退出码。Chrome 不在默认路径时
-设置 `CHROME_PATH`。
+的现场 bug（两者都会真删会话，都有守卫），`e2e-probe.mjs` 是一次性的 DOM 侦察。
+**哪些脚本真的会失败**很关键——一份永远以 0 退出的过程记录，无论读起来多让人放心，
+都不是测试：
+
+| 脚本 | 会失败吗 |
+|---|---|
+| `e2e-residue.mjs` | 会（抛错 → exit 1） |
+| `e2e-dialog-style.mjs` | 会（8 项样式检查，任一不过就抛） |
+| `e2e-realclick.mjs` | 会——它的 bug-1 hover/点击断言是真的 `exit 1` 路径，不再只是日志 |
+| `e2e-contrast.mjs` | 会（危险红字在明暗两套主题下须达 WCAG AA） |
+| `e2e-guard.mjs` | 会（拒绝未播种的 home） |
+| `e2e-check.mjs`、`e2e-mutations.mjs`、`e2e-bug2.mjs`、`e2e-live.mjs`、`e2e-probe.mjs` | 不会——它们打印过程记录。真**崩溃**（缺 Chrome、超时）仍会非 0 退出，但断言失败在退出码里看不见，所以要看输出 |
+
+Chrome 不在默认路径时设置 `CHROME_PATH`。
 
 如果你想手写调用本插件的路由（这些脚本都走真实 UI，所以都没体现这一点）：路由挂在共享的
 `/api` 前缀下，并且要求 connection 插件那套信封 ——

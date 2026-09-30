@@ -79,12 +79,22 @@ Evidence, probes and the chronological record live in
   already gone). The settings page additionally filters queued ids out of its
   rows (client-side, via `pendingIds`). `deferred/list` reports which queued
   ids are still `recoverable` (artifact dir on disk); `deferred/cancel`
-  (`cancelPending`) READS the queue first, then clears the tombstone, then drops
-  the marker — a registry failure leaves the entry fully queued and retryable,
-  and an unreadable queue fails before anything is touched (reading AFTER the
-  tombstone was cleared would leave "no tombstone + still queued", and the next
-  boot would finish the deletion the user just cancelled). It also
-  REFUSES entries whose files are already gone (`session/data-gone`) —
+  (`cancelPending`) READS the queue, then DROPS THE MARKER, then clears the
+  tombstone — and rewrites the marker if the registry write fails.
+  ⚠ **The order is marker-first for a data-safety reason, and the earlier
+  "clear the tombstone, then drop the marker" rationale was incomplete.** Both
+  halves are durable writes and the pair is not atomic, so a failure between
+  them strands exactly one of two states. "Marker dropped, tombstone still set"
+  is harmless: the session stays hidden, and nothing finishes a deletion without
+  a queued marker, so a retry or a restore resolves it. "Tombstone cleared,
+  marker still set" is DATA LOSS — the boot sweep reads the surviving marker and
+  deletes the session the user just cancelled, after the failed cancel told them
+  nothing had happened (proven by probe: the cancel throws, the session
+  reappears in the list, and the next start removes its files). The old order
+  was chosen for the REGISTRY-failure case and is right for it; marker-first
+  plus a compensating `_addPending` also keeps that case retryable, so nothing
+  is given up. It also REFUSES entries whose files are already gone
+  (`session/data-gone`) —
   un-tombstoning one would expose the artifact-less lingering summary as an
   ungrouped row, so the UI's hidden cancel button is a protocol rule, not a
   convention. The pending banner splits on that same flag: only `recoverable`

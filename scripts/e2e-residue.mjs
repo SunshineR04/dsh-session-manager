@@ -198,6 +198,9 @@ await sleep(1200)
 const menuItems = await page.evaluate(() => [...document.querySelectorAll('[role="menuitem"]')].map((el) => (el.textContent || '').trim().slice(0, 30)))
 record('menu-items', menuItems)
 const clickedDelete = await page.evaluate(() => {
+  // SUBSTRING matching on purpose: dsh appends shortcut hints to the official
+  // menu labels (`归档会话` renders as `归档会话Ctrl+Alt+A`), so an exact match
+  // silently stopped matching after an upstream change.
   const item = [...document.querySelectorAll('[role="menuitem"]')].find((el) => (el.textContent || '').includes('彻底删除'))
   if (item === undefined) return false
   item.click()

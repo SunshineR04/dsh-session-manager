@@ -99,6 +99,40 @@ test('a re-encode of a decoded body is stable', () => {
   assert.equal(once, body, 'decode -> encode is a fixed point, so a sweep write-back cannot churn the file')
 })
 
+test('a body that PARSES but is not this format is DEGRADED too, not an empty queue', () => {
+  // The same hazard as a torn file, one step later: these all parse cleanly, so
+  // a decoder that only asked `Array.isArray(parsed.sessionIds)` answered
+  // "empty queue, nothing wrong" — and because every writer persists the
+  // snapshot it just read, the next write-back would publish `[]` and erase
+  // every live marker. The module header promises "degraded, never an empty
+  // queue" for anything it cannot understand, so each of these must refuse.
+  for (const text of [
+    '{}',                                              // valid JSON, no sessionIds
+    'null',                                            // parses to null
+    '[]',                                              // wrong top-level type
+    '{"version":2}',                                   // a version but no ids
+    '{"version":2,"sessionIds":null}',                 // ids present but not an array
+    '{"version":3,"entries":[{"id":"' + A + '"}]}',    // a future format this build cannot read
+    '{"sessionIds":"' + A + '"}',                       // a bare string instead of an array
+  ]) {
+    const decoded = decodePendingQueue(text)
+    assert.equal(decoded.degraded, true, `${text} must be degraded`)
+    assert.equal(typeof decoded.reason, 'string')
+    assert.deepEqual(decoded.entries, [])
+  }
+})
+
+test('a legitimately empty queue and a v1 body are NOT degraded', () => {
+  // The other direction: this fix must not refuse the shapes the plugin itself
+  // writes, or every boot would report an unreadable queue.
+  const empty = decodePendingQueue(JSON.stringify({ version: 2, sessionIds: [], detached: {} }))
+  assert.equal(empty.degraded, false, 'an empty queue is a normal state, not corruption')
+  assert.deepEqual(empty.entries, [])
+  const v1 = decodePendingQueue(JSON.stringify({ sessionIds: [A] }))
+  assert.equal(v1.degraded, false, 'a v1 body carries no version and must still read')
+  assert.deepEqual(v1.entries.map((entry) => entry.id), [A])
+})
+
 test('the exported pattern is the one the manager uses', () => {
   // Single-sourced: `assertSessionId` in lib/index.js imports THIS regex, so a
   // relaxation here would widen the manager choke point too.
