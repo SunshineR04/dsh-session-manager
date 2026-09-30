@@ -634,7 +634,16 @@ test('apply schedules the boot sweep, which finishes a crash-left tombstone', as
   }
   // Exit only on a VALID empty read: `null` means "unreadable right now" (the
   // cross-device fallback write is not atomic), not "drained".
-  for (let i = 0; i < 500; i++) {
+  //
+  // The bound is WALL CLOCK, not a turn count. The sweep's stages complete on
+  // threadpool filesystem I/O, and a turn count drains the event loop far faster
+  // than that I/O lands on a fast machine: 500 `setImmediate` turns finish in
+  // ~13 ms on Ubuntu CI, long before the queue write-back is observable, so the
+  // assertion below failed there while passing on Windows (where the same 500
+  // turns take hundreds of ms and the I/O wins the race). `setTimeout` cannot be
+  // used to pace the wait — this test mocks it.
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline) {
     const ids = queueIds()
     if (Array.isArray(ids) && ids.length === 0) break
     await new Promise((resolve) => setImmediate(resolve))
