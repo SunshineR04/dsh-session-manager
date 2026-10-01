@@ -10,8 +10,18 @@ so a change that requires a newer dsh host says so explicitly.
 
 ## [Unreleased]
 
-- **The destructive-e2e guard resolves the real home through its existing
-  PARENT.** CI run #19 failed one case on BOTH legs
+Nothing yet.
+
+## [0.4.9] - 2026-10-02
+
+Closes the one case CI failed on when v0.4.8 was tagged. Tooling only: `scripts/`
+is not in `package.json → files`, so nothing in the published plugin changes (the
+`lib/` code is byte-identical to 0.4.8).
+
+### Fixed — the destructive-e2e guard on a machine with no dsh install
+
+- **The guard now resolves the real home through its existing PARENT.** CI run
+  #19 failed one case on BOTH legs
   (`a junction or symlink pointing at the real home is refused AS the real home`)
   purely because a runner has no dsh install: `~/.dsh` does not exist there, so
   the link is dangling, `realpathSync` throws and falls back to `resolve()`. That
@@ -23,8 +33,9 @@ so a change that requires a newer dsh host says so explicitly.
   the missing tail, the real home is compared in both forms (its path and its
   resolved target, so a symlinked home is refused either way), and a new case
   runs the guard against a FAKE home — the CI shape — asserting both the ancestor
-  and the inside-the-home refusals there. Tooling only: `scripts/` is not shipped
-  in the package, so the 0.4.8 tag stays where it is.
+  and the inside-the-home refusals there. The four guard rules are each
+  mutation-checked in that CI-shaped environment, and the whole suite is run in
+  it too (200 tests, 0 fail, the documented 6 contract skips).
 
 ## [0.4.8] - 2026-10-02
 
