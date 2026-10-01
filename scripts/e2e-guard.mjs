@@ -16,7 +16,7 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 
 /** Marker written by `scripts/e2e-seed.mjs` into the seeded home. */
 export const E2E_MARKER = '.session-manager-e2e'
@@ -24,21 +24,44 @@ export const E2E_MARKER = '.session-manager-e2e'
 const fold = (value) => (process.platform === 'win32' ? value.toLowerCase() : value)
 
 /**
- * The path as the FILESYSTEM sees it. `resolve()` only normalizes text: it does
- * not follow a symlink or a junction, does not expand an 8.3 short name
- * (`ADMINI~1`) and does not strip a `\\?\` prefix — each of which was a way past
- * the old exact-string comparison with the real home. A path that does not exist
- * yet (the seed's own target) falls back to `resolve()`.
+ * The path as the FILESYSTEM sees it, resolving as much of it as EXISTS.
+ *
+ * `realpathSync.native` throws on a path that is not there, and falling back to
+ * plain `resolve()` then keeps whatever spelling the caller used — an 8.3 short
+ * name (`ADMINI~1`), a case variant, a symlink. That asymmetry is not cosmetic:
+ * on a machine with no dsh install (`~/.dsh` absent — every CI runner) the real
+ * home was canonicalized one way and the target the other, so the equality and
+ * prefix rules MISSED and only the marker check stood in the way. Resolving the
+ * nearest existing ancestor and re-appending the missing tail makes both sides
+ * spell-consistent.
  */
 const canonical = (target) => {
-  try {
-    return realpathSync.native(target)
-  } catch {
-    return resolve(target)
+  const resolved = resolve(target)
+  let current = resolved
+  const missing = []
+  for (;;) {
+    try {
+      const real = realpathSync.native(current)
+      return missing.length === 0 ? real : join(real, ...missing.reverse())
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return resolved // nothing on this path exists
+      missing.push(basename(current))
+      current = parent
+    }
   }
 }
 
-const realHome = () => canonical(join(homedir(), '.dsh'))
+/**
+ * Every spelling of the real home that must be refused. The base is
+ * `canonical(homedir())` + `.dsh` rather than `canonical(homedir()/.dsh)`,
+ * because the home itself may not exist — and because a home that IS a symlink
+ * has to be refused as both its link path and its target.
+ */
+const realHomes = () => {
+  const link = join(canonical(homedir()), '.dsh')
+  return [...new Set([link, canonical(link)])]
+}
 
 /** The filesystem-canonical form of a path (see {@link canonical}). */
 export const canonicalPath = (target) => canonical(target)
@@ -63,13 +86,13 @@ export function assertDisposableHome(home, { script, allowUnseeded = false } = {
     throw new Error(`${script}: an isolated DSH_HOME is required — pass the home scripts/e2e-seed.mjs created (--home <path>)`)
   }
   const target = canonical(home)
-  const real = realHome()
+  const real = realHomes()
   // Case-insensitive on Windows, and a PREFIX check, not just equality: the real
   // home can be reached by a case variant, a short name, an UNC path, a
   // junction, or `\\?\…`, and a delete inside `~/.dsh/anything` is too close for
   // comfort.
-  if (fold(target) === fold(real) || fold(target).startsWith(fold(real) + sep)) {
-    throw new Error(`${script}: refusing to run against the REAL dsh home (${real}) or anything inside it; seed a disposable home with scripts/e2e-seed.mjs`)
+  if (real.some((home_) => fold(target) === fold(home_) || fold(target).startsWith(fold(home_) + sep))) {
+    throw new Error(`${script}: refusing to run against the REAL dsh home (${real[0]}) or anything inside it; seed a disposable home with scripts/e2e-seed.mjs`)
   }
   // An ANCESTOR of the real home is refused as well. `assertDisposableHome(home)`
   // is a plausible slip — `HOMEDIR` reads like a fine scratch path — and the
@@ -77,8 +100,8 @@ export function assertDisposableHome(home, { script, allowUnseeded = false } = {
   // real home's siblings, and copy `.credentials.yaml` beside them. The "not
   // empty and unmarked" rule catches that only by luck (and not at all once a
   // marker exists there).
-  if (fold(real).startsWith(fold(target) + sep)) {
-    throw new Error(`${script}: ${target} CONTAINS the real dsh home (${real}) — refusing to treat a parent of your real home as disposable`)
+  if (real.some((home_) => fold(home_).startsWith(fold(target) + sep))) {
+    throw new Error(`${script}: ${target} CONTAINS the real dsh home (${real[0]}) — refusing to treat a parent of your real home as disposable`)
   }
   const marker = join(target, E2E_MARKER)
   if (!existsSync(marker)) {

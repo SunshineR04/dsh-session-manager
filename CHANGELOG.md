@@ -10,7 +10,21 @@ so a change that requires a newer dsh host says so explicitly.
 
 ## [Unreleased]
 
-Nothing yet.
+- **The destructive-e2e guard resolves the real home through its existing
+  PARENT.** CI run #19 failed one case on BOTH legs
+  (`a junction or symlink pointing at the real home is refused AS the real home`)
+  purely because a runner has no dsh install: `~/.dsh` does not exist there, so
+  the link is dangling, `realpathSync` throws and falls back to `resolve()`. That
+  was not only a test defect — `realpathSync` does not run on a missing path, so
+  the real home kept the caller's spelling while the target got resolved (8.3
+  short names, case), and the equality/prefix rules could MISS, leaving the
+  marker check as the only thing between a path inside the real home and a
+  delete. `canonical()` now resolves the nearest existing ancestor and re-appends
+  the missing tail, the real home is compared in both forms (its path and its
+  resolved target, so a symlinked home is refused either way), and a new case
+  runs the guard against a FAKE home — the CI shape — asserting both the ancestor
+  and the inside-the-home refusals there. Tooling only: `scripts/` is not shipped
+  in the package, so the 0.4.8 tag stays where it is.
 
 ## [0.4.8] - 2026-10-02
 

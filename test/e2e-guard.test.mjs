@@ -8,8 +8,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 import { E2E_MARKER, assertDisposableHome, assertInstanceServesHome, canonicalPath, homeSessionIds } from '../scripts/e2e-guard.mjs'
 
@@ -81,19 +82,66 @@ test('a case variant, a short name and a trailing separator cannot smuggle the r
   refuse(`${REAL_HOME}.`)
 })
 
-test('a junction or symlink pointing at the real home is refused AS the real home', async (t) => {
-  // The reason matters, not just the refusal: the marker check would also refuse
-  // this link today (the real home carries no marker), so an assertion that only
-  // said "throws" would stay green with `resolve()` — which is exactly how the
-  // link-shaped bypass survived.
-  const link = join(await mkdtemp(join(tmpdir(), 'sm-guard-')), 'link')
+test('a link is resolved to its target, so it cannot launder a real-home path', async (t) => {
+  // The REASON matters, not just the refusal: the marker check refuses most
+  // paths anyway, so an assertion that only said "throws" stayed green with
+  // `resolve()` in place of a real-path resolution — which is how the
+  // link-shaped bypass survived. This test asserted a link AT the real home and
+  // passed locally, then failed on CI, where no dsh is installed: `~/.dsh` does
+  // not exist there, so the link is DANGLING, `realpath` throws and falls back
+  // to the link path — a different refusal.
+  //
+  // So the two assertions are split, and neither needs `~/.dsh` to exist:
+  //   1. `canonicalPath` really follows a link, and is not just `resolve()`;
+  //   2. a link to the real home's PARENT is refused as something that CONTAINS
+  //      the real home — unreachable without that resolution.
+  const root = await mkdtemp(join(tmpdir(), 'sm-guard-'))
+  const target = join(root, 'target')
+  const link = join(root, 'link')
+  const kind = process.platform === 'win32' ? 'junction' : 'dir'
+  await mkdir(target, { recursive: true })
   try {
-    await symlink(REAL_HOME, link, process.platform === 'win32' ? 'junction' : 'dir')
+    await symlink(target, link, kind)
+    await symlink(dirname(REAL_HOME), join(root, 'parent-link'), kind)
   } catch {
     t.skip('this platform will not let the test create a link without elevation')
     return
   }
-  assert.throws(() => assertDisposableHome(link, { script: 'test' }), /REAL dsh home/)
+
+  assert.equal(canonicalPath(link), canonicalPath(target), 'the canonical form follows the link')
+  assert.notEqual(canonicalPath(link), resolve(link), 'and it is NOT the link path itself')
+  assert.throws(() => assertDisposableHome(join(root, 'parent-link'), { script: 'test' }), /CONTAINS the real dsh home/)
+
+  // Where dsh IS installed, cover the original case as well: a link at the real
+  // home, refused as the real home and not merely as an unseeded directory.
+  if (existsSync(REAL_HOME)) {
+    await symlink(REAL_HOME, join(root, 'real-link'), kind)
+    assert.throws(() => assertDisposableHome(join(root, 'real-link'), { script: 'test' }), /REAL dsh home/)
+  }
+})
+
+test('the real home is refused even where it does NOT exist, and whatever its spelling', async () => {
+  // CI has no dsh install, so `~/.dsh` is absent there — and `realpathSync` does
+  // not run on a missing path, so the real home kept the caller's spelling while
+  // the target got resolved (8.3 short names, case). The equality and prefix
+  // rules then MISSED and only the marker check stood between a target inside the
+  // real home and a delete. Found by running this suite with a fake home, i.e.
+  // the CI shape, instead of only on a developer box.
+  const fake = await mkdtemp(join(tmpdir(), 'sm-guard-'))
+  const key = process.platform === 'win32' ? 'USERPROFILE' : 'HOME'
+  const previous = process.env[key]
+  process.env[key] = fake
+  try {
+    assert.equal(existsSync(join(fake, '.dsh')), false, 'this case is about a machine with no dsh install')
+    assert.throws(() => assertDisposableHome(fake, { script: 'test' }), /CONTAINS the real dsh home/)
+    assert.throws(() => assertDisposableHome(join(fake, '.dsh', 'sub'), { script: 'test' }), /inside it/)
+    // …and a properly marked home elsewhere is still accepted.
+    const seeded = await seededHome({ sessions: [['proj1', ID]] })
+    assertDisposableHome(seeded, { script: 'test' })
+  } finally {
+    if (previous === undefined) delete process.env[key]
+    else process.env[key] = previous
+  }
 })
 
 test('an unmarked home is refused, and only the seed may pass allowUnseeded', async () => {
