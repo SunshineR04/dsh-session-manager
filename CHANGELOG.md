@@ -12,6 +12,155 @@ so a change that requires a newer dsh host says so explicitly.
 
 Nothing yet.
 
+## [0.4.8] - 2026-10-02
+
+A second review-driven release. Every fix below is regression-guarded by a test
+that was mutation-checked against the OLD code (the new cases were run with the
+fix reverted, and each failed).
+
+### Fixed — a cold delete could be lost in its own crash window
+
+- **A cold delete now writes the pending marker and takes the archive-set
+  tombstone, and finishes both inside the same call.** It used to write no marker
+  at all, so a crash between the archive-set write and the `rm` left a session
+  that was un-archived, detached and unqueued while its files stayed on disk: the
+  next start listed it again as an **ungrouped row**, and this plugin could no
+  longer list, restore or retry it. The corpus read inside the file phase made
+  that window wide, not instantaneous. A cold session has no in-memory copy that
+  can outlive it, so the deletion now completes synchronously — tombstone and
+  marker cleared once the files are gone.
+- **A file-phase failure on a cold delete no longer reports a finished delete.**
+  The entry stays tombstoned AND queued, which is exactly the state the boot
+  sweep exists to finish; reporting success while the row could come back was the
+  "resurrection" shape in slow motion. The result says so in its warnings.
+- **The marker and the tombstone are now written as a pair or not at all.** A
+  tombstone with no marker to clear it is the one strand nothing recovers from,
+  so the one remaining escape hatch — a cold delete on an unreadable queue, kept
+  because it is the only delete left when the file is corrupt — proceeds WITHOUT
+  either and reports that it is not crash-safe.
+- **`deferred/cancel` refuses an id that is not queued, with the new stable code
+  `session/not-pending`.** Cancelling is the one operation that puts a session
+  back: it clears a tombstone. Without the guard, cancelling a merely archived id
+  cleared its archive membership and returned success — a restore nobody asked
+  for, reachable from a stale client, a second window, a hand-made request, or
+  two hosts on one `DSH_HOME`. `restoreSession`'s `session/pending` refusal is
+  its mirror image; the check comes before the `session/data-gone` probe, because
+  for an id nobody queued the request itself is wrong.
+
+### Fixed — the client: focus, keyboard ownership, and silent skips
+
+- **A confirmed row delete no longer drops focus on `<body>`.** `focusAfterDelete`
+  asked `[data-sm-row-delete], [data-sm-bulk-delete]` — and the bulk button is
+  FIRST in document order while being `disabled` with an empty selection, and
+  focusing a disabled control is a spec'd no-op. So every confirmed delete asked
+  a control that could not take focus and the section fallback below it was
+  unreachable. The selector now carries `:not([disabled])`, and the render test
+  asserts WHICH target was asked (the old assertion only counted requests, which
+  is how this shipped).
+- **Cancelling the context-menu delete hands focus back.** The menu item IS the
+  opener and is unmounted when the menu closes, so the "restore to the opener"
+  branch could not work there — the code's own comment claimed it fell forward
+  and it did not. Focus now falls through to the caller's landing logic, which
+  focuses the session row.
+- **Escape in the confirm dialog claims the key.** Our capture-phase handler ran
+  first and prevented nothing, while the Settings panel behind the dialog is a
+  `useModalLayer` consumer whose document-level Escape handler bails out on
+  `event.defaultPrevented` — so one Escape cancelled the dialog AND closed the
+  whole Settings page (whose own focus restore then overrode ours).
+- **A bulk run reports the running sessions it skipped.** `deleted` counted only
+  successes and the summary mentioned only deleted/failed, so confirming five
+  sessions and deleting two read as "deleted 2"; if every target turned running
+  the run finished in total silence. The skips are counted, added to the summary
+  and to the success line, the progress counter advances for them, and the
+  all-running case always says something.
+- **The plain-DOM toast takes a `kind` and is named `plainToast`.** It painted
+  every message in the error colour, so the menu path's ONLY feedback channel
+  drew a successful permanent delete exactly like a failure — and sharing the
+  name `toast` with the component-local `toast(kind, text)` made a one-argument
+  call inside the component a warning toast with `undefined` text.
+
+### Fixed — accessibility: AA on the surfaces the acceptance script cannot see
+
+Measured against the installed theme tokens (WCAG 2.x relative luminance).
+`e2e-contrast.mjs` samples three buttons on the OPAQUE card, so none of these
+were covered by its 4/4 pass:
+
+- **The `role="alert"` failure banner was the failure channel and missed AA in
+  both themes** — `dangerText` on
+  `--dsw-alias-interactive-bg-hover-danger` (`#ec13130d` light / `#f25a5a26`
+  dark) measured **4.44:1 light and 3.94:1 dark**. It now sits on the opaque
+  `panelSurface` with a 1px danger border, where the same text measures
+  4.83/4.73 — the same rule the cards, rows and toasts already followed.
+- **Link/action text** (`Restore`, `Refresh`, `Cancel deletion`, the running
+  pill) was `--dsw-alias-state-business-primary` = **4.24:1** on the light card —
+  under AA, while the file's own hardcoded fallback (`#4a5cf0`) would have passed
+  5.15:1. New `TOKENS.primaryText` = `light-dark(#4868b2, #7aaaff)` = 5.39/5.99:1.
+- **Small meta text** was `--dsw-alias-label-tertiary` = **3.70:1** on the light
+  card. New `TOKENS.metaText` = `light-dark(#61666b, #adb2b8)` = 5.80/6.53:1, and
+  there is deliberately no `textTertiary` token left to use by accident.
+- **The dialog's danger button** left its white label at **4.4976:1** on the
+  theme's `#ec1313` — the very number this repository cites as the reason that
+  red cannot carry text, and it is just as short under a white label. New
+  `TOKENS.dangerFill` = `light-dark(#dc2626, #f25a5a)` = 4.83:1 in light.
+
+### Fixed — the e2e tooling that can delete a real user's sessions
+
+- **The URL is now bound to the validated home.** `assertDisposableHome` proved
+  the home was throwaway but nothing proved the instance behind the page used it,
+  so `node scripts/e2e-residue.mjs <your real instance URL> --home <seeded>`
+  passed every check and permanently deleted real sessions. Every destructive
+  script now calls `assertInstanceServesHome` first: it asks the page for the
+  session ids it can see (the plugin's own `list` endpoint plus the
+  `[data-row-key^="session:"]` rows) and requires all of them to exist in the
+  seeded home, failing CLOSED when the page reports nothing.
+- **The marker is validated instead of trusted by name.** A directory called
+  `.session-manager-e2e` used to satisfy it, and so did a stale marker restored
+  from a home snapshot. It must now be a regular JSON file written by this
+  repository's seed, recording THIS home (the seed writes `home`; a pre-0.4.8
+  marker is refused, so an old home must be re-seeded).
+- **The real-home refusal survives case variants, short names, junctions and
+  `\\?\` paths** — it canonicalizes with `realpathSync.native` and compares
+  case-insensitively on Windows, and refuses anything INSIDE the real home too.
+- **`e2e-seed.mjs` cannot half-destroy a home any more**: the full spec shape and
+  a `source != target` refusal now run before the first `rm`, and the marker is
+  written BEFORE it — a spec with a valid `sessions` array but no `workspaces`
+  used to crash after the delete and after copying the real `.credentials.yaml`,
+  leaving a mutilated, unmarked home holding a secret that no script would accept
+  again. A session-copy failure is fatal instead of a warning.
+- **`e2e-contrast.mjs` still exits 2 when the archived ROW was not measured.**
+  The header's bulk-delete and Refresh buttons render on an empty archive set
+  too, so "something was measured" silently degraded into a one-button check.
+- **`e2e-probe.mjs`'s module-roster line can be true now** — it scanned
+  `Object.keys(window.__DSH_BOOT__)` for a module name, which is always false
+  (the wire object's keys are `rev`/`entries`/`batches`).
+- **The analysis doc's session ids are truncated**, per this repository's own
+  "no real ids in the repo" rule.
+
+### Added — guards for the classes above
+
+- **`test/e2e-guard.test.mjs` (new, 11 cases)**: the destructive-e2e guard had
+  only ever been "verified" by running a script against a good home. It now has
+  unit coverage that needs no dsh and no Chrome — the real-home refusal (name,
+  prefix, an ANCESTOR of it, case variant, junction), the marker validation
+  (directory, non-JSON, foreign plugin, different home, missing `home`), the id
+  set, and the instance↔home binding including its fail-closed rule. It never
+  writes inside the real home.
+- **`apply` is asserted to mount the agent tools.** Deleting
+  `registerTools(ctx, manager)` used to keep the suite green while all three
+  tools silently never mounted (the test whose name says "…but still mounts
+  tools" asserted only a warning), and the list tool's `execute` body — limit
+  clamp, item projection, error branch — had never run at all.
+- **The `settings` fake now has the REAL surface** (`configure`/`describe`/
+  `update`/`documentPath`, no `get`). It used to hand the manager a `get()` the
+  installed service does not have, and drove the only test of the
+  `sessionListLimit` clamp through it — the invented-shape class that has hidden
+  three field bugs in this project. The clamp is now driven through the
+  composition config, and `truncated` (previously unasserted) is pinned.
+- New client cases: the disabled-control focus rule, the cancel-path focus, the
+  Escape claim, the bulk skip report, and all four AA replacements above.
+
+**Test count: 178 → 199 (0 fail, 0 skip).**
+
 ## [0.4.7] - 2026-10-01
 
 A review-driven release. Every fix here is regression-guarded by a test that was
@@ -77,10 +226,14 @@ reverted, and each failed).
 - **Measured in the live GUI, the row's 12.5px 彻底删除 was 4.24:1** against the
   dark card surface, below the 4.5:1 floor (the light theme was also marginal at
   the aliased red-600, 4.50:1). The theme ships no red that clears AA as TEXT on
-  both surfaces, so a `dangerText` token now derives one with `color-mix`
-  (darken for light schemes, lighten for dark ones) from the same red-500 scale
-  entry. `danger` keeps the FILL role (the confirm button's background, toast
-  borders), which was never the failing case.
+  both surfaces, so a `dangerText` token now uses `light-dark(#dc2626, #f36b6b)`
+  — the primitive the host's own `color-scheme: light|dark` makes resolvable in
+  inline styles, where a var() fallback inside `light-dark()` would have pinned
+  BOTH branches to one value. (An earlier candidate derived the colour with
+  `color-mix()` and made the dark theme WORSE: 4.24 → 2.96. Do not go back to
+  it — measure, see AGENTS.md.) `danger` keeps the FILL role (the confirm
+  button's background, toast borders); the fill itself was deepened separately in
+  0.4.8.
 
 ### Fixed — the e2e scripts could not see what they claimed to test
 

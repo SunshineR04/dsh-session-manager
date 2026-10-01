@@ -79,8 +79,26 @@ Evidence, probes and the chronological record live in
   already gone). The settings page additionally filters queued ids out of its
   rows (client-side, via `pendingIds`). `deferred/list` reports which queued
   ids are still `recoverable` (artifact dir on disk); `deferred/cancel`
-  (`cancelPending`) READS the queue, then DROPS THE MARKER, then clears the
-  tombstone — and rewrites the marker if the registry write fails.
+  (`cancelPending`) REFUSES an id that is not queued at all
+  (`session/not-pending` — cancelling is the one operation that puts a session
+  BACK, so a stale or hand-made request must not restore something nobody
+  queued; `restoreSession`'s `session/pending` refusal is its mirror image),
+  then READS the queue, then DROPS THE MARKER, then clears the tombstone — and
+  rewrites the marker if the registry write fails.
+- **A cold delete takes the SAME route and finishes inside the same call.** The
+  marker and the tombstone are not an open-session speciality any more: the
+  marker is what makes the file phase crash-safe, and a cold delete used to write
+  none, so a crash between the archive-set write and the `rm` left a session that
+  was un-archived, detached and unqueued while its files stayed on disk — the
+  next start listed it as an ungrouped row and this plugin could no longer list,
+  restore or retry it (the corpus read inside the file phase makes that window
+  wide, not instantaneous). Because nothing of a cold session outlives the
+  delete, `deleteLocked` clears the tombstone and drops the marker itself once
+  the files are gone; a file-phase failure (or a throwing detach) leaves the
+  entry tombstoned AND queued, which is exactly the state `finishDeferredDeletion`
+  already knows how to complete. The one exception: an unreadable queue, where a
+  cold delete still proceeds (the escape hatch) without a marker and REPORTS that
+  it is not crash-safe, while an open delete refuses.
   ⚠ **The order is marker-first for a data-safety reason, and the earlier
   "clear the tombstone, then drop the marker" rationale was incomplete.** Both
   halves are durable writes and the pair is not atomic, so a failure between

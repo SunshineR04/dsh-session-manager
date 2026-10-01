@@ -12,7 +12,7 @@
 // scripts/e2e-guard.mjs.
 import puppeteer from 'puppeteer-core'
 
-import { assertDisposableHome } from './e2e-guard.mjs'
+import { assertDisposableHome, assertInstanceServesHome } from './e2e-guard.mjs'
 
 const argv = process.argv.slice(2)
 const homeIndex = argv.indexOf('--home')
@@ -99,6 +99,10 @@ const record = (step, value) => {
 
 await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
 await sleep(9000)
+// The home is approved; now prove the INSTANCE behind this URL is the one
+// serving it, before the first click. This is the half the `--home` argument
+// cannot prove on its own (see scripts/e2e-guard.mjs).
+await assertInstanceServesHome(page, e2eHome, { script: 'e2e-residue' })
 
 // The preview notice blocks the sidebar until dismissed.
 await page.evaluate(() => {

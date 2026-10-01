@@ -7,7 +7,7 @@
 import { join, dirname } from 'node:path'
 import puppeteer from 'puppeteer-core'
 
-import { assertDisposableHome } from './e2e-guard.mjs'
+import { assertDisposableHome, assertInstanceServesHome } from './e2e-guard.mjs'
 
 const url = process.argv[2]
 const e2eHome = process.argv[3]
@@ -129,6 +129,9 @@ async function sidebarTitles() {
 
 await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
 await sleep(10000)
+// `menuDelete` below clicks Delete and CONFIRMS unconditionally, so the URL has
+// to be proven to serve the approved home first (see scripts/e2e-guard.mjs).
+await assertInstanceServesHome(page, e2eHome, { script: 'e2e-live' })
 console.log('[0] sidebar:', JSON.stringify(await sidebarTitles()))
 
 console.log('[1] open session A:', await clickRow(TITLE))

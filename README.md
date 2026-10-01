@@ -189,10 +189,15 @@ attachments are content-addressed and intentionally kept.
     behavior, where a reload re-shows the row while archived rows are displayed.
 - **Pending banner**: the settings page lists only the sessions you can
   still act on. Entries with files on disk (e.g. a mid-delete crash leftover)
-  get a row with **Cancel deletion**, which reads the queue first, then clears
-  the tombstone, then drops the marker (registry first, marker second, so a
-  failure leaves the entry fully retryable; an unreadable queue touches
-  nothing). Entries whose files are already gone (the normal open-session
+  get a row with **Cancel deletion**, which reads the queue, drops the pending
+  marker FIRST and only then clears the tombstone — the reverse order could
+  strand "tombstone cleared, marker still set", which is data loss: the next
+  start reads that surviving marker and deletes the very session you just
+  cancelled. If the registry refuses the un-archive the marker is written back,
+  so the cancel stays retryable; an unreadable queue touches nothing; and an id
+  that is not queued at all is refused with `session/not-pending` (cancelling is
+  the one operation that puts a session BACK, so it must not restore something
+  nobody queued). Entries whose files are already gone (the normal open-session
   delete) have nothing left to act on, so they collapse into a single
   "Deleted · cleaned up automatically after restart" summary line with an optional
   expander for their ids instead of occupying the banner — and canceling one
@@ -206,8 +211,19 @@ attachments are content-addressed and intentionally kept.
   (including a torn file from the non-atomic fallback write) makes every
   queue-dependent operation — listing, restore, cancel, open-session delete and
   the boot sweep — refuse with `session-manager/internal`, log it, and leave the
-  file untouched. Repairing the file restores everything; a **cold** delete
-  writes no marker and reads no queue, so it is unaffected.
+  file untouched. Repairing the file restores everything; a **cold** delete still
+  proceeds (it is the only delete left when the queue is corrupt) but now says in
+  its result that it is *not crash-safe*, because without a marker a crash during
+  it cannot be finished at the next start.
+- **A cold delete finishes in the same call, without losing its crash safety**:
+  it writes the same pending marker and keeps the same archive tombstone while it
+  works, then clears both once the files are gone. If the file phase fails
+  (Windows `EPERM`/`EBUSY`, a search indexer, a foreign handle) the entry stays
+  tombstoned **and** queued instead of reporting a finished delete whose row the
+  sidebar would render again, and the next start's sweep retries it. Before this,
+  a crash between the archive-set write and the file removal left a session that
+  was neither archived nor deleted — listed again as an ungrouped row, and no
+  longer reachable from this plugin at all.
 - Restore only removes the id from the archive set — archiving keeps the
   workspace `sessionIds` slot, so the session returns to its previous position.
   A queued-for-deletion id is refused with `session/pending` (cancel it first
@@ -274,11 +290,28 @@ node scripts/e2e-contrast.mjs <URL> <e2e-home>      # 6. WCAG AA contrast of the
 one archived session); it exits 2 with nothing to measure otherwise. It is
 read-only: it archives and deletes nothing.
 
-⚠ Steps 4 and 5 **really delete sessions**: the `--home` argument (or step 4's
-second positional) is now required, and the home must carry the marker
-`scripts/e2e-seed.mjs` writes. Without it — or when it names the real `~/.dsh` —
-the script refuses to run, because a URL alone cannot prove which home the
-instance behind it serves (see `scripts/e2e-guard.mjs`).
+⚠ Steps 4 and 5 **really delete sessions**, and they are guarded twice, because
+each check proves something the other cannot (`scripts/e2e-guard.mjs`):
+
+1. the `--home` argument (or step 4's second positional) is required, and the
+   home must carry a marker `scripts/e2e-seed.mjs` wrote **for that very path**.
+   The real `~/.dsh` is refused by name, by prefix (nothing inside it either),
+   and through a case variant, an 8.3 short name, a junction, a symlink or a
+   `\\?\` path — the comparison resolves real paths, case-insensitively on
+   Windows. A directory that merely *looks* like a marker, a marker copied from
+   another home, and a marker from before 0.4.8 (it records no home) are refused
+   too: re-seed.
+2. the INSTANCE behind the URL must be serving that home. A URL cannot prove it,
+   so before the first click the script asks the page which sessions it can see
+   (the plugin's own list endpoint plus the rendered `session:…` rows) and
+   refuses unless every one of them exists in the seeded home — failing closed
+   when the page answers nothing at all. Without this, pointing a script at your
+   own running dsh with a valid seeded `--home` passed every check and deleted
+   your real sessions.
+
+Both are unit-tested without a browser (`test/e2e-guard.test.mjs`), and the seed
+itself validates its whole spec, refuses `source == target`, and writes the
+marker *before* it deletes anything.
 
 The remaining scripts are diagnostics, not acceptance tests:
 `e2e-bug2.mjs` and `e2e-live.mjs` reproduce fixed field bugs (both delete, both

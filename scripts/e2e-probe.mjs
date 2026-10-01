@@ -23,8 +23,13 @@ const report = await page.evaluate(() => {
   const out = {}
   out.boot = window.__DSH_BOOT__
   out.bootKeys = out.boot === undefined ? undefined : Object.keys(out.boot)
-  out.hasOurModule = out.bootKeys !== undefined && out.bootKeys.some((k) => String(k).includes('session-manager'))
   out.bootEntries = out.boot === undefined ? undefined : (Array.isArray(out.boot) ? out.boot.length : typeof out.boot)
+  // The roster lives in `boot.entries[].id`. This used to scan
+  // `Object.keys(__DSH_BOOT__)` for a module name, which is ALWAYS false — the
+  // wire object's own keys are `rev`/`entries`/`batches`, so the probe reported
+  // "absent" for a plugin that was mounted. e2e-check.mjs does it correctly.
+  const entries = out.boot !== undefined && Array.isArray(out.boot.entries) ? out.boot.entries : []
+  out.hasOurModule = entries.some((entry) => String(entry.id).includes('session-manager'))
 
   // settings trigger: anything clickable whose text is exactly 设置 / Settings
   out.settingsTexts = [...document.querySelectorAll('*')]

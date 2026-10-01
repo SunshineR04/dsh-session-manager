@@ -7,17 +7,24 @@
 // (gitignored; see `e2e-seed.local.example.json` for the shape) so no real
 // paths or session ids end up in the repository.
 // Run: node scripts/e2e-seed.mjs <e2e-home> [<source-dsh-home>]
+//
+// ORDER IS THE CONTRACT: every refusal (real home, a non-empty unmarked target,
+// a malformed or stale spec, source == target) happens before the first `rm`,
+// and the marker is written before the first `rm` too — so whatever this script
+// destroys is always inside a directory it has already claimed as disposable,
+// and a failure half-way through cannot leave a home holding a copy of the real
+// `.credentials.yaml` that no script will ever accept again.
 import { mkdir, cp, rm, writeFile, readFile, readdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { E2E_MARKER, assertDisposableHome } from './e2e-guard.mjs'
+import { E2E_MARKER, assertDisposableHome, canonicalPath } from './e2e-guard.mjs'
 
-const e2eHome = process.argv[2]
-const sourceHome = process.argv[3] ?? join(homedir(), '.dsh')
-if (!e2eHome) {
+const requestedHome = process.argv[2]
+const sourceHome = canonicalPath(process.argv[3] ?? join(homedir(), '.dsh'))
+if (!requestedHome) {
   console.error('usage: node scripts/e2e-seed.mjs <e2e-home> [<source-dsh-home>]')
   process.exit(2)
 }
@@ -27,8 +34,9 @@ if (!e2eHome) {
 // else must be either already seeded (marker) or EMPTY — so a typo cannot wipe
 // an unrelated tree either. Both checks run BEFORE the first `rm`, because a
 // guard that runs after the delete is not a guard.
+let e2eHome
 try {
-  assertDisposableHome(e2eHome, { script: 'e2e-seed', allowUnseeded: true })
+  ({ home: e2eHome } = assertDisposableHome(requestedHome, { script: 'e2e-seed', allowUnseeded: true }))
 } catch (error) {
   console.error(error.message)
   process.exit(2)
@@ -42,6 +50,15 @@ if (!existsSync(join(e2eHome, E2E_MARKER))) {
   }
 }
 
+// `node scripts/e2e-seed.mjs <home> <home>` used to pass the staleness check,
+// then destroy the fixture with the `rm` below, fail every copy with ENOENT
+// (warned, not thrown) and still print "e2e home seeded" with exit 0. Nothing
+// has been touched at this point, so refusing costs nothing.
+if (canonicalPath(e2eHome) === canonicalPath(sourceHome)) {
+  console.error(`e2e-seed: the source and the target are the same home (${e2eHome}); seeding would empty the fixture it copies from.`)
+  process.exit(2)
+}
+
 const specPath = join(dirname(fileURLToPath(import.meta.url)), 'e2e-seed.local.json')
 let spec
 try {
@@ -52,8 +69,34 @@ try {
   process.exit(2)
 }
 
-const SESSIONS = spec.sessions.map((entry) => [entry.project, entry.id, entry.archived === true])
-const WORKSPACES = spec.workspaces
+// The SHAPE is validated before the `rm` too. A spec with a valid `sessions`
+// array but no `workspaces` used to crash at `WORKSPACES.map` AFTER the delete
+// and after the credential copy, leaving a mutilated home holding a copy of the
+// real `.credentials.yaml` — which the "no marker and not empty" rule above then
+// refuses forever.
+const shapeErrors = []
+const specSessions = Array.isArray(spec.sessions) ? spec.sessions : []
+const specWorkspaces = Array.isArray(spec.workspaces) ? spec.workspaces : []
+if (specSessions.length === 0) shapeErrors.push('`sessions` must be a non-empty array')
+if (specWorkspaces.length === 0) shapeErrors.push('`workspaces` must be a non-empty array')
+for (const [index, entry] of specSessions.entries()) {
+  if (typeof entry?.project !== 'string' || entry.project === '' || typeof entry?.id !== 'string' || entry.id === '') {
+    shapeErrors.push(`sessions[${index}] needs a non-empty string \`project\` and \`id\``)
+  }
+}
+for (const [index, workspace] of specWorkspaces.entries()) {
+  if (typeof workspace?.id !== 'string' || typeof workspace?.path !== 'string' || !Array.isArray(workspace?.sessionIds)) {
+    shapeErrors.push(`workspaces[${index}] needs a string \`id\`, a string \`path\` and an array \`sessionIds\``)
+  }
+}
+if (shapeErrors.length > 0) {
+  console.error(`e2e-seed: ${specPath} is not a usable seed spec (nothing was created):`)
+  for (const problem of shapeErrors) console.error(`  - ${problem}`)
+  process.exit(2)
+}
+
+const SESSIONS = specSessions.map((entry) => [entry.project, entry.id, entry.archived === true])
+const WORKSPACES = specWorkspaces
 
 // Every spec'd session must EXIST before anything is created.
 //
@@ -74,6 +117,16 @@ if (missing.length > 0) {
   console.error('e2e-seed: (the sidebar hides archived rows by default, so an all-archived spec leaves nothing to open).')
   process.exit(2)
 }
+
+// Claim the directory as a disposable e2e home BEFORE mutating it. Everything
+// above this line only reads; from here on, a failure leaves a home that is
+// already marked (so it can be re-seeded or deleted) instead of a half-written
+// directory holding a copy of the real credentials and refused by every script.
+await mkdir(e2eHome, { recursive: true })
+await writeFile(
+  join(e2eHome, E2E_MARKER),
+  JSON.stringify({ plugin: 'dsh-session-manager', home: e2eHome, seededAt: new Date().toISOString(), seededFrom: sourceHome }, null, 2),
+)
 
 await rm(join(e2eHome, 'sessions'), { recursive: true, force: true })
 await rm(join(e2eHome, 'storages'), { recursive: true, force: true })
@@ -103,7 +156,13 @@ for (const [project, id] of SESSIONS) {
   try {
     await cp(source, target, { recursive: true })
   } catch (error) {
-    console.warn(`e2e-seed: cannot copy ${source}: ${error.message}`)
+    // Fatal, not a warning: the staleness pre-check above proved this session
+    // existed a moment ago, so a copy failure means something changed underneath
+    // us — and a "seeded" home missing a session the spec names is the spent
+    // fixture that surfaces later looking like a plugin bug.
+    console.error(`e2e-seed: cannot copy ${source}: ${error.message}`)
+    console.error(`e2e-seed: ${e2eHome} is marked disposable but incomplete — delete it and re-run.`)
+    process.exit(1)
   }
   try {
     await cp(join(sourceHome, 'storages', 'session_projcache', 'sessions', `${id}.json`), join(e2eHome, 'storages', 'session_projcache', 'sessions', `${id}.json`))
@@ -131,11 +190,5 @@ const registry = {
   },
 }
 await writeFile(join(e2eHome, 'storages', 'workspace.json'), JSON.stringify(registry, null, 2))
-// Marker for the DESTRUCTIVE e2e scripts: they refuse to run against a home
-// this seed did not create (see scripts/e2e-guard.mjs) — otherwise pointing
-// one at the user's own instance deletes their sessions.
-await writeFile(
-  join(e2eHome, E2E_MARKER),
-  JSON.stringify({ plugin: 'dsh-session-manager', seededAt: new Date().toISOString(), seededFrom: sourceHome }, null, 2),
-)
 console.log(`e2e home seeded: ${e2eHome}`)
+console.log(`e2e-seed: the marker was written first, so a failure above leaves ${e2eHome} recognisable and disposable — delete it and re-run.`)

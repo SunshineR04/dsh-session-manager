@@ -130,7 +130,12 @@ function makeCtx(overrides = {}) {
     sessionPersistence: persistence,
     sessionController: overrides.sessionController ?? sessionController,
     sessions: { get: (id) => live.get(id) },
-    settings: overrides.settings ?? { get: () => undefined },
+    // The REAL settings surface: `SettingsForms` carries configure / describe /
+    // update / documentPath and NO `get`, so the plugin's forward-compatible
+    // `settings.get` read yields nothing in production. A fake that handed it a
+    // `get()` was driving the only test of the sessionListLimit clamp — the exact
+    // invented-shape class that hid three field bugs before it.
+    settings: overrides.settings ?? { configure: () => {}, describe: () => ({}), update: async () => ({}), documentPath: () => undefined },
     logger: overrides.logger ?? { warn: () => {}, info: () => {} },
   }
 
@@ -353,6 +358,12 @@ test('a file failure after bookkeeping is a warning, not an aborted delete', asy
   // session was no longer listable, retryable or cancellable while its files
   // stayed on disk. POSIX permits removing a live CWD, so the failure assertion
   // is platform-aware; what must hold EVERYWHERE is that the delete commits.
+  //
+  // Since 0.4.8 the failure has a second half: the entry STAYS queued and
+  // tombstoned so the boot sweep retries the cleanup, instead of leaving a
+  // session that is live again in every listing while its files are still on
+  // disk. That is the only difference between the two platform outcomes below,
+  // and it is exactly the branch this test can force.
   const fixture = await makeFixture()
   const { ctx, headers, state } = makeCtx({ fixture })
   headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
@@ -368,12 +379,16 @@ test('a file failure after bookkeeping is a warning, not an aborted delete', asy
     process.chdir(previousCwd)
   }
   assert.equal(result.deleted, true, 'the delete still commits')
-  assert.deepEqual(state.archivedSessionIds, [], 'and the archive entry is still released')
   if (process.platform === 'win32') {
     assert.ok(
       (result.warnings ?? []).some((line) => line.includes('could not be removed')),
       `the file failure is REPORTED rather than thrown (warnings: ${JSON.stringify(result.warnings)})`,
     )
+    assert.deepEqual(state.archivedSessionIds, [SESSION_ID], 'the tombstone stays: the unconsumed session must not be listed again')
+    assert.deepEqual(await manager.readPending(), [SESSION_ID], 'and the entry stays queued for the boot sweep to retry')
+  } else {
+    assert.deepEqual(state.archivedSessionIds, [], 'the archive entry is released once the files are verifiably gone')
+    assert.deepEqual(await manager.readPending(), [], 'and nothing is left queued')
   }
 })
 
@@ -550,9 +565,11 @@ test('an archive-set failure on an open delete reports that the deletion is alre
 test('a failing workspace detach is a warning, not an abort that half-books the session', async () => {
   // Throwing out of the detach loop left the session detached from some
   // workspaces, still archived and with its files intact — the "ungrouped
-  // resurrection" shape this plugin exists to prevent.
+  // resurrection" shape this plugin exists to prevent. The delete completes and
+  // the failure is reported; the entry then stays queued (the detach is retried
+  // by the boot sweep) rather than being reported as fully finished.
   const fixture = await makeFixture()
-  const { ctx, headers, registry } = makeCtx({ fixture })
+  const { ctx, headers, state, registry } = makeCtx({ fixture })
   headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
   await writeSessionFiles(fixture, SESSION_ID)
   registry.list()[0].detachSession = async () => { throw new Error('detach exploded') }
@@ -560,9 +577,130 @@ test('a failing workspace detach is a warning, not an abort that half-books the 
 
   const result = await manager.deleteSession(SESSION_ID)
   assert.equal(result.deleted, true, 'the confirmed delete still completes')
-  assert.equal(result.warnings.length, 1)
-  assert.match(result.warnings[0], /could not be detached from workspace "ws-1"/)
-  assert.match(result.warnings[0], /detach exploded/)
+  assert.ok(result.warnings.some((line) => /could not be detached from workspace "ws-1"/.test(line) && /detach exploded/.test(line)))
+  assert.deepEqual(await manager.readPending(), [SESSION_ID], 'the unfinished detach keeps the entry queued')
+  assert.deepEqual(state.archivedSessionIds, [SESSION_ID], 'and tombstoned, so the half-booked session stays hidden')
+})
+
+test('a cancel of an id that is NOT queued is refused, and never un-archives it', async () => {
+  // Cancelling is the one operation that puts a session BACK: it clears a
+  // tombstone. Without this guard, an id that was merely archived — never
+  // queued — was un-archived and reported as a successful cancel: a restore
+  // nobody asked for, reachable from a stale client, a second window, or a
+  // hand-made request. `restoreSession`'s `session/pending` refusal is its
+  // mirror image.
+  const fixture = await makeFixture()
+  const { ctx, headers, state, registry } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  const manager = createSessionManager(ctx, {})
+  // No queue file at all: a valid, empty queue.
+
+  await assert.rejects(manager.cancelPending(SESSION_ID), (error) => {
+    assert.ok(error instanceof SessionManagerError)
+    assert.equal(error.code, 'session/not-pending')
+    return true
+  })
+  assert.deepEqual(state.archivedSessionIds, [SESSION_ID], 'the archive membership is untouched')
+  assert.deepEqual(registry.list()[0].sessionIds, [SESSION_ID], 'and so is the workspace slot')
+  assert.equal(existsSync(manager.pendingFile()), false, 'a refused cancel does not even create an empty queue file')
+})
+
+test('a cold delete queues and finishes inline, leaving no tombstone or marker', async () => {
+  // Cold deletes used to write no marker at all, so a crash between the
+  // archive-set write and the `rm` left the session un-archived, detached and
+  // unqueued while its files stayed on disk — the next start listed it again as
+  // an ungrouped row. The marker + tombstone now cover that window, and because
+  // a cold session has no in-memory copy that could outlive it, the deletion
+  // finishes in the same call.
+  const fixture = await makeFixture()
+  const { ctx, headers, state } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  const manager = createSessionManager(ctx, {})
+
+  const result = await manager.deleteSession(SESSION_ID)
+  assert.equal(result.deleted, true)
+  assert.equal(result.openAtDelete, undefined, 'a cold session is not reported as open')
+  assert.equal(result.warnings, undefined, `unexpected warnings: ${JSON.stringify(result.warnings)}`)
+  assert.deepEqual(state.archivedSessionIds, [], 'the tombstone went in and came back out')
+  assert.deepEqual(await manager.readPending(), [], 'and the marker is gone, so nothing is queued')
+  assert.equal(
+    existsSync(join(fixture.sessionsRoot, `--${CWD.replace(/[\\/:]/g, '-')}--`, SESSION_ID)),
+    false,
+    'the artifact directory is gone',
+  )
+})
+
+test('a cold delete that cannot finish stays hidden and queued, and the sweep completes it', async () => {
+  // A warning from the file phase must not report a finished deletion whose
+  // residue the sidebar would render as a live session again. The entry stays
+  // tombstoned + queued — exactly the state the boot sweep exists to finish.
+  const fixture = await makeFixture()
+  const { ctx, headers, state, registry } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  registry.list()[0].detachSession = async () => { throw new Error('detach exploded') }
+  const manager = createSessionManager(ctx, {})
+
+  const result = await manager.deleteSession(SESSION_ID)
+  assert.equal(result.deleted, true)
+  assert.ok(result.warnings.some((line) => line.includes('next dsh start')), `the user is told a restart finishes it: ${JSON.stringify(result.warnings)}`)
+  assert.deepEqual(state.archivedSessionIds, [SESSION_ID], 'still hidden from every official view')
+  assert.deepEqual(await manager.readPending(), [SESSION_ID], 'still queued')
+
+  const swept = await manager.sweepPending()
+  assert.deepEqual(swept.deleted, [SESSION_ID], 'the boot sweep is the recovery path it is queued for')
+  assert.deepEqual(state.archivedSessionIds, [], 'and it clears the tombstone')
+  assert.deepEqual(await manager.readPending(), [], 'and drops the marker')
+})
+
+test('a cold delete still proceeds when the queue is unreadable, and says what that costs', async () => {
+  // "Refuse, never guess" is scoped to queue-DEPENDENT work, and a cold delete
+  // never used to read the queue at all — that escape hatch is deliberate.
+  // Keeping it means accepting, and REPORTING, the one thing it costs: with no
+  // marker, a crash in the file phase cannot be finished by the next start.
+  const fixture = await makeFixture()
+  const { ctx, headers, state } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  await mkdir(fixture.storagesRoot, { recursive: true })
+  const manager = createSessionManager(ctx, {})
+  await writeFile(manager.pendingFile(), 'not json at all', 'utf8')
+
+  const result = await manager.deleteSession(SESSION_ID)
+  assert.equal(result.deleted, true, 'a corrupt queue does not block the delete')
+  assert.ok(result.warnings.some((line) => line.includes('NOT crash-safe')), `the cost is on the record: ${JSON.stringify(result.warnings)}`)
+  assert.deepEqual(state.archivedSessionIds, [], 'no tombstone without a durable marker to clear it')
+  assert.equal(readFileSync(manager.pendingFile(), 'utf8'), 'not json at all', 'and the unreadable file is never rewritten from an empty view')
+})
+
+test('a cold delete whose tombstone write fails reports that a restart will finish it', async () => {
+  // The marker is durable before the archive-set write for cold sessions too, so
+  // the open delete's contract applies: the deletion WILL happen at the next
+  // start, and "it failed" alone would show the user a session that looks alive
+  // while it is queued for removal.
+  const fixture = await makeFixture()
+  const { ctx, headers, state, registry } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  state.archivedSessionIds = [SESSION_ID]
+  const manager = createSessionManager(ctx, {})
+  registry.archiveSession = async () => { throw new Error('registry write refused') }
+
+  await assert.rejects(manager.deleteSession(SESSION_ID), (error) => {
+    assert.equal(error.code, 'session-manager/internal')
+    assert.equal(error.details.queued, true, 'the caller must be told a restart will complete it')
+    assert.match(error.message, /queued and will be completed on the next dsh start/)
+    return true
+  })
+  assert.deepEqual(await manager.readPending(), [SESSION_ID], 'the claim is true: the marker is on disk')
+  assert.deepEqual(state.archivedSessionIds, [SESSION_ID], 'the session stays archived, so it cannot resurface')
+  assert.equal(
+    existsSync(join(fixture.sessionsRoot, `--${CWD.replace(/[\\/:]/g, '-')}--`, SESSION_ID)),
+    true,
+    'and its files are untouched — nothing was deleted',
+  )
 })
 
 test('a boot sweep whose tombstone write fails keeps the entry queued', async () => {
@@ -671,6 +809,7 @@ test("archive-set writes go through the registry's own serialized entry points",
   headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
   headers.set(OTHER_ID, { id: OTHER_ID, cwd: CWD })
   await writeSessionFiles(fixture, SESSION_ID)
+  await writeSessionFiles(fixture, OTHER_ID)
   const workspace = workspaceFor('ws-1', [SESSION_ID, OTHER_ID])
   const { registry, calls } = officialRegistry(state, headers, [workspace])
   ctx.services.workspaceRegistry = registry
@@ -687,12 +826,15 @@ test("archive-set writes go through the registry's own serialized entry points",
   assert.deepEqual(calls.archive[0].options, { stopActivity: true })
   assert.deepEqual(state.archivedSessionIds, [SESSION_ID], 'the tombstone landed')
 
-  // A COLD session: unarchiveSession.
+  // A COLD session: the same official pair, in the other direction — the
+  // tombstone goes in first (kept only together with a durable marker) and the
+  // inline finish takes it back out with `unarchiveSession`.
   ctx.services.sessions = { get: () => undefined }
   state.archivedSessionIds = [OTHER_ID]
   const cold = await manager.deleteSession(OTHER_ID)
   assert.equal(cold.deleted, true)
-  assert.deepEqual(calls.unarchive, [OTHER_ID])
+  assert.deepEqual(calls.archive.map((call) => call.id), [SESSION_ID, OTHER_ID], 'the cold delete tombstones through the official entry point too')
+  assert.deepEqual(calls.unarchive, [OTHER_ID], 'and its inline finish releases the tombstone the same way')
   assert.deepEqual(state.archivedSessionIds, [])
 
   // restoreSession goes through it too. The open delete above left a queue
@@ -739,6 +881,11 @@ test('an unwritable registry is refused BEFORE anything is touched', async () =>
   assert.equal(calls.setState, 0)
 
   await assert.rejects(manager.restoreSession(SESSION_ID), (error) => error.code === 'registry/unavailable')
+  // A cancel has to prove two things first — that the id is queued and that its
+  // files are still there — so seed both. The unwritable registry is still what
+  // has to refuse it, and still before anything is touched.
+  await mkdir(join(fixture.home, 'storages'), { recursive: true })
+  await writeFile(manager.pendingFile(), JSON.stringify({ version: 2, sessionIds: [SESSION_ID], detached: {} }), 'utf8')
   await assert.rejects(manager.cancelPending(SESSION_ID), (error) => error.code === 'registry/unavailable')
 })
 
@@ -1315,10 +1462,15 @@ test('concurrent deletes serialize instead of losing an archive-set update', asy
   const { ctx, headers, state } = makeCtx({ fixture })
   headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
   headers.set(OTHER_ID, { id: OTHER_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
+  await writeSessionFiles(fixture, OTHER_ID)
   state.archivedSessionIds.push(OTHER_ID)
   // A host shape where setState applies asynchronously (last write wins):
   // without the operation lock both deletes read the same archived-set
   // snapshot and one id survives as a ghost row (proven by review probe).
+  // Each cold delete is two read-modify-write windows now — the tombstone in
+  // and the inline finish out — so the lock is what keeps the removals from
+  // being written back from a stale snapshot.
   ctx.services.workspaceRegistry.setState = async (next) => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     state.archivedSessionIds = [...next.archivedSessionIds]
@@ -1353,13 +1505,27 @@ test('deleteSession refuses an unpersisted live session and leaves no queue mark
   assert.deepEqual(await manager.readPending(), [])
 })
 
-test('listArchived clamps a corrupt sessionListLimit override', async () => {
+test('listArchived clamps a corrupt limit from the composition config, and REPORTS truncation', async () => {
+  // The clamp used to be tested through a `settings` fake that handed the manager
+  // a `get()` the real service does not have, i.e. through a channel production
+  // cannot reach. The composition config is the reachable one, and `truncated` —
+  // the flag behind the UI's "showing N of M" line — had no test at all.
   const fixture = await makeFixture()
-  const { ctx, headers } = makeCtx({ fixture, settings: { get: () => ({ sessionListLimit: 'not-a-number' }) } })
-  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD, createdAt: 1690000000000 })
-  const manager = createSessionManager(ctx, {})
+  const { ctx, headers, state } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  headers.set(OTHER_ID, { id: OTHER_ID, cwd: CWD })
+  state.archivedSessionIds.push(OTHER_ID)
+
+  const manager = createSessionManager(ctx, { sessionListLimit: 'not-a-number' })
   const result = await manager.listArchived()
-  assert.equal(result.items.length, 1, 'a NaN override must fall back to the default cap, not empty the list')
+  assert.equal(result.items.length, 2, 'a NaN limit must fall back to the default cap, not empty the list')
+  assert.equal(result.truncated, false)
+
+  const capped = createSessionManager(ctx, { sessionListLimit: 1 })
+  const limited = await capped.listArchived()
+  assert.equal(limited.items.length, 1, 'the cap limits the returned rows')
+  assert.equal(limited.truncated, true, 'and the caller is TOLD the list was cut')
+  assert.equal(limited.archivedSessionIds.length, 2, 'while the full id list still comes back')
 })
 
 test('rpc handler enforces the sessionId guard and maps domain errors', async () => {
@@ -1400,6 +1566,7 @@ test('agent tools register and the delete tool requires confirm', async () => {
   const fixture = await makeFixture()
   const { ctx, headers, state } = makeCtx({ fixture })
   headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
   const registered = []
   ctx.services.tools = { register: (def) => { registered.push(def) } }
   const manager = createSessionManager(ctx, {})
@@ -1459,6 +1626,7 @@ test('the delete tool refuses sessions that are not archived', async () => {
   const { ctx, headers, state } = makeCtx({ fixture })
   headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
   headers.set(OTHER_ID, { id: OTHER_ID, cwd: CWD })
+  await writeSessionFiles(fixture, SESSION_ID)
   const registered = []
   ctx.services.tools = { register: (def) => { registered.push(def) } }
   const manager = createSessionManager(ctx, {})
@@ -1519,6 +1687,36 @@ test('apply stays offline without the connection service but still mounts tools'
     apply(ctx, {})
     assert.ok(warnings.some((message) => message.includes('connection')), 'missing connection is reported as a warning')
   })
+})
+
+test('apply mounts the agent tools, not just the fetch routes', async () => {
+  // `registerTools(ctx, manager)` inside `apply` had NO coverage: every tool test
+  // called `registerTools` directly, and the apply test whose NAME says "…but
+  // still mounts tools" asserted only a warning line. Deleting the call kept the
+  // suite green while all three agent tools silently never mounted — the
+  // "a surface that does not exist" shape this project keeps re-learning.
+  const fixture = await makeFixture()
+  const { ctx, headers } = makeCtx({ fixture })
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD, createdAt: 1690000000000 })
+  const registered = []
+  ctx.services.tools = { register: (definition) => { registered.push(definition) } }
+
+  apply(ctx, {})
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(
+    registered.map((definition) => definition.name),
+    ['session_list_archived', 'session_restore_archived', 'session_delete_permanently'],
+    'all three tools are registered by apply()',
+  )
+
+  // …and one of them really runs against this mount (its list-tool body used to
+  // be untested too: the limit clamp, the item projection and the error branch).
+  const listed = JSON.parse(await registered[0].execute({ limit: 5 }))
+  assert.equal(listed.ok, true)
+  assert.equal(listed.count, 1)
+  assert.equal(listed.items[0].sessionId, SESSION_ID)
+  assert.equal(listed.items[0].workspace, 'project')
+  assert.equal(JSON.parse(await registered[0].execute({ limit: 0 })).count, 1, 'a 0/NaN limit falls back to 50 rather than returning nothing')
 })
 
 test('the fetch route envelope round-trips ping and rejects a mismatched method', async () => {

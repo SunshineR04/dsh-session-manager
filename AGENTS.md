@@ -10,7 +10,7 @@ TypeScript, no linter, no bundler. Package manager is **pnpm**; Node >= 20
 
 ```bash
 pnpm install
-pnpm test   # scripts.check (node --check, every lib file) + 8 suites; the list in
+pnpm test   # scripts.check (node --check, every lib file) + 9 suites; the list in
             # package.json -> scripts.test is the whole truth
 ```
 
@@ -64,6 +64,12 @@ pnpm test   # scripts.check (node --check, every lib file) + 8 suites; the list 
   `{ header, … }` wrappers (three inline fixtures: the current shape and a
   renamed wrapper must pass, a bare header must fail) — the shape `lib/index.js`
   unwraps, and the one whose absence had a seam silently dead.
+- **`test/e2e-guard.test.mjs`** pins the DESTRUCTIVE e2e guard
+  (`scripts/e2e-guard.mjs`): the real-home refusal (name, prefix, case variant,
+  junction/symlink), the marker validation, the seed's `home` binding, the
+  instance↔home binding and its fail-closed rule. It needs no dsh and no Chrome,
+  so it runs in CI — which makes the guard the one safety layer for irreversible
+  deletes with machine coverage. It never writes inside the real home.
 - **dsh 0.1.7 line required.** Both hard dependencies arrived in it: the
   size-neutral product icons, and the `sidebar.workspaces.session.menu.item`
   slot (present from 0.1.7-alpha.1 — 0.1.5-rc.1, 0.1.5-rc.3 and 0.1.6-alpha.1
@@ -87,16 +93,44 @@ pnpm test   # scripts.check (node --check, every lib file) + 8 suites; the list 
   `e2e-live.mjs` really delete (their confirm click is unconditional), and
   `e2e-dialog-style.mjs` mutates the archive set on its fallback path. Each
   requires the seeded home (positional for mutations/bug2/live/dialog-style,
-  `--home <path>` for residue) and refuses without the `.session-manager-e2e`
-  marker the seed writes — including an explicit refusal for the real home,
-  because a URL alone cannot prove which home an instance serves
-  (`scripts/e2e-guard.mjs`).
+  `--home <path>` for residue).
+  ⚠ **Two INDEPENDENT checks, both required, both in `scripts/e2e-guard.mjs` and
+  both unit-tested without a browser (see above).** They used to be one, and the
+  half that was missing is the half that can delete a real user's sessions:
+  1. `assertDisposableHome` — the HOME is disposable. It canonicalizes with
+     `realpathSync.native` (so a junction, a symlink, an 8.3 short name, a
+     `\\?\` prefix or a case variant cannot walk past the comparison), refuses
+     the real home by equality AND by prefix (nothing inside `~/.dsh` either),
+     and then VALIDATES the marker instead of trusting its name: a regular FILE
+     that parses as JSON, whose `plugin` is ours and whose recorded `home`
+     canonicalizes to this very path. A directory named like the marker, a stale
+     marker restored from a home snapshot, and a pre-0.4.8 marker with no `home`
+     are all refused — **re-seed an old home, it will not be accepted**.
+  2. `assertInstanceServesHome` — the INSTANCE behind the URL serves that home.
+     A `--home` argument cannot prove this, so the script asks the page for the
+     session ids it can see (the plugin's own `list` endpoint plus the
+     `[data-row-key^="session:"]` rows) and requires every one of them to exist
+     under the seeded home's `sessions/`, refusing on the first foreign id and
+     failing CLOSED when the page reports nothing at all. Pointing a destructive
+     script at your own running dsh with a valid `--home` used to pass every
+     check and delete real sessions.
+  Every destructive script calls both before its first click.
   ⚠ **`e2e-seed.mjs` is itself destructive**: it `rm -rf`s the target's
-  `sessions/` and `storages/`, and copies your real `.credentials.yaml` in. It
-  must therefore validate FIRST, before any delete — the real home is refused,
-  and any other target must be either already marked or EMPTY. Never move that
-  check below the first `rm`: a guard that runs after the delete is not a guard.
-  Keep the guard on any new destructive script.
+  `sessions/` and `storages/`, and copies your real `.credentials.yaml` in.
+  The ORDER, precisely: the guard, the "already marked or EMPTY" rule, the FULL
+  spec shape (`sessions` and `workspaces` non-empty arrays with usable entries),
+  a `source != target` refusal, and then the marker write — every one of them
+  BEFORE the first `rm`. Never move a check below the first `rm`: a guard that
+  runs after the delete is not a guard. What that ordering fixes, concretely: a
+  spec whose `sessions` parsed but whose `workspaces` was missing crashed AFTER
+  the delete and AFTER the credential copy, leaving a mutilated, unmarked home
+  holding a copy of the real `.credentials.yaml` that the seed then refused
+  forever; `node scripts/e2e-seed.mjs <home> <home>` emptied the very fixture it
+  was copying from and still exited 0; and a session-copy failure only warned.
+  That last one is fatal now (the staleness pre-check proved the session existed
+  a moment ago), and the marker goes in FIRST so any later failure leaves a home
+  that is recognisable, disposable and re-seedable. Keep the guard on any new
+  destructive script.
   ℹ **Assertion status — do not mistake a transcript for a test.** These can
   FAIL: `e2e-residue.mjs`, `e2e-dialog-style.mjs`, `e2e-realclick.mjs`,
   `e2e-contrast.mjs` and the guard itself. `e2e-check.mjs`, `e2e-mutations.mjs`,
@@ -116,16 +150,22 @@ pnpm test   # scripts.check (node --check, every lib file) + 8 suites; the list 
   hook. Menu items must be matched by **substring** (`includes('彻底删除')`): dsh
   appends shortcut hints (`归档会话` → `归档会话Ctrl+Alt+A`), so an `===` match
   silently stopped matching once already.
-  ⚠ **A session row's action cluster is not in the DOM until the row is both
-  OPENED and hovered**, and its trigger is NOT a descendant reachable by
-  `row.querySelectorAll` — it renders in a sibling `rowActions` span. Locate it by
-  the official label `会话“<title>”的操作`, and take the title from a CHILD
-  element (`[...row.children]`), never `row.textContent`: that concatenates the
-  relative-date badge (`Review session zip archive21天`) and therefore never
-  matches. POLL for the trigger (≤8s, re-hovering each round) — opening a session
-  materialises the cluster on a host round-trip, so a single probe reports "no
-  menu" for a row that has one. Only a non-empty session has a cluster at all
-  (`新会话` renders 0 buttons), so pick a row that has one.
+  ⚠ **A session row's action cluster is in the DOM for every non-blank row, and
+  it IS a descendant of the row** — an earlier revision of this file claimed the
+  opposite ("not reachable by `row.querySelectorAll`; it renders in a sibling
+  span"), which is contradicted by the installed 0.2.0-rc.2 bundle: the
+  `rowActions` span is one of the `data-row-key` div's own children, and only
+  `display:none` hides it until `:hover`/`.menuOpen`. `e2e-residue.mjs` and
+  `e2e-dialog-style.mjs` already use the row-scoped form and are correct. What
+  DOES follow from the CSS is the practical rule: a hidden element has a zero
+  rect, so hover first, then read the rect. Locate the trigger by the official
+  label `会话“<title>”的操作`, and take the title from a CHILD element
+  (`[...row.children]`), never `row.textContent`: that concatenates the
+  relative-date badge (`My session title21天`, i.e. a real title plus `21天`) and
+  therefore never matches. POLL for the trigger (≤8s, re-hovering each round) —
+  opening a session materialises the cluster on a host round-trip, so a single
+  probe reports "no menu" for a row that has one. Only a non-empty session has a
+  cluster at all (`新会话` renders 0 buttons), so pick a row that has one.
   ⚠ **The trigger must be scoped by TITLE when several session rows are open** —
   `document.querySelector('button[aria-label^="会话"]')` returns the FIRST
   session's button, which on a page with two rows is the wrong session.
@@ -144,6 +184,32 @@ pnpm test   # scripts.check (node --check, every lib file) + 8 suites; the list 
   shipped literals measure 4.83:1 light and 4.73:1 dark. Do not "simplify" it
   back to a single `--dsw-*` alias — measure first (`npm run` has no browser, so
   run the script).
+  ⚠ **It samples three buttons on the OPAQUE card, so it cannot see the rest of
+  what this plugin paints — and three more text roles WERE under AA.** All are
+  fixed with their own `light-dark()` tokens and pinned by
+  `test/client.render.test.mjs` (measurements from the installed theme tokens,
+  per WCAG 2.x relative luminance):
+  · the `role="alert"` failure banner painted `dangerText` on
+    `--dsw-alias-interactive-bg-hover-danger` (`#ec13130d` light /
+    `#f25a5a26` dark) = **4.44:1 light, 3.94:1 dark** — the failure channel
+    itself, under the floor in BOTH themes. It now sits on the opaque
+    `panelSurface` with a 1px danger border, where the same text measures
+    4.83/4.73;
+  · link/action labels (`Restore`, `Refresh`, `Cancel deletion`, the running
+    pill) used `--dsw-alias-state-business-primary` = **4.24:1** on the light
+    card (the file's own fallback `#4a5cf0` would have passed 5.15:1) →
+    `TOKENS.primaryText` = `light-dark(#4868b2, #7aaaff)` = 5.39/5.99:1;
+  · small meta text used `--dsw-alias-label-tertiary` = **3.70:1** light →
+    `TOKENS.metaText` = `light-dark(#61666b, #adb2b8)` = 5.80/6.53:1. There is
+    deliberately NO `textTertiary` token: that token may not carry text at this
+    plugin's sizes (icons have a 3:1 floor, text does not);
+  · the dialog's danger FILL (`--dsw-alias-state-error-primary` light `#ec1313`)
+    left its white label at **4.4976:1** — the very number this file cites as the
+    reason that red cannot carry text → `TOKENS.dangerFill` =
+    `light-dark(#dc2626, #f25a5a)` = 4.83:1.
+  The header's bulk-delete and Refresh buttons render on an EMPTY archive set
+  too, so "we measured something" is not the acceptance: the script now tracks
+  whether the archived ROW was sampled at all and still exits 2 when it was not.
   ⚠ **The e2e fixtures are consumable.** The seed spec bakes in ONE non-blank,
   non-archived session, and `e2e-residue.mjs` DELETES it — so a later script that
   needs a restorable/openable session (`e2e-dialog-style.mjs` on its fallback
@@ -175,7 +241,7 @@ pnpm test   # scripts.check (node --check, every lib file) + 8 suites; the list 
   archived rows by default, so an all-archived spec leaves nothing to open).
   The seed reads machine-specific data from `scripts/e2e-seed.local.json`
   (gitignored; copy `e2e-seed.local.example.json`) — keep real paths/session
-  ids out of the repo.
+  ids out of the repo. The analysis doc's ids are truncated for the same reason.
 
 ## Architecture
 
@@ -245,6 +311,12 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
   Every dsh service is reached through `ctx.get(...)` wrapped in `tryGet` —
   surfaces register **defensively** and silently don't mount if the service is
   absent. Registrations go through `ctx.effect(fn, label)` for cleanup.
+  ⚠ **`registerTools(ctx, manager)` inside `apply` was covered by NOTHING** until
+  0.4.8: every tool test called `registerTools` directly, and the apply test
+  named "…but still mounts tools" asserted only a warning line. Deleting the call
+  left the suite green with all three agent tools silently unmounted. The test
+  now drives `apply(ctx, {})` with a fixture `tools` service and asserts three
+  registrations plus one `execute`.
 - **`lib/client.js` — browser half**. Hand-written, **no bundler, no JSX**:
   wrapped in `window.__ModuleLoader__.load({ id, factory })`, CJS-style
   `require` of React and the `@deepseek-ai/dsh-client-*` modules listed in
@@ -303,10 +375,10 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
 - Client↔host RPC envelope: `{ ok: true, value }` / `{ ok: false, error: { code, message } }`;
   domain errors are `SessionManagerError` with **stable codes**
   (`session/running`, `session/not-found`, `session/not-archived`,
-  `session/pending`, `session/data-gone`, `registry/unavailable`,
-  `bad-request`, `session-manager/internal`) matched structurally: the RPC
-  client attaches `error.code` to thrown errors (`isRunningError`), tool layer
-  matches on code.
+  `session/pending`, `session/not-pending`, `session/data-gone`,
+  `registry/unavailable`, `bad-request`, `session-manager/internal`) matched
+  structurally: the RPC client attaches `error.code` to thrown errors
+  (`isRunningError`), tool layer matches on code.
   ⚠ **A HAND-MADE call to an exact route must speak that envelope too** —
   discovered the hard way (2026-09-30) while probing `deferred/cancel` from an
   authenticated page: `POST /api/session-manager/<endpoint>` with
@@ -321,11 +393,15 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
 
 ## Invariants and gotchas
 
-- **Delete order is deliberate — per path**: `deleteLocked` does registry
-  bookkeeping first (detach from its workspace, then remove from the archive set),
-  files second, then a `ctx.emit('api-session/removed', sessionId)` broadcast.
-  `finishDeferredDeletion` (the boot sweep) disposes files FIRST and does the same
-  accounting afterwards, which is fine because the session is cold there. The
+- **Delete order is deliberate — per path**: `deleteLocked` writes the pending
+  marker FIRST (crash safety; cold deletes included since 0.4.8), then does
+  registry bookkeeping (detach from its workspace, then keep/put the id in the
+  archive set as a tombstone), then disposes files, then — cold only — clears the
+  tombstone and the marker, then broadcasts `ctx.emit('api-session/removed',
+  sessionId)`. The marker and the tombstone are written as a PAIR or not at all: a
+  tombstone with no marker left to clear it is the one strand nothing recovers
+  from. `finishDeferredDeletion` (the boot sweep) disposes files FIRST and does the
+  same accounting afterwards, which is fine because the session is cold there. The
   load-bearing half in both — detach BEFORE unarchive, so a row never flashes back
   into the workspace browser — must not be reordered in either. A file failure
   after bookkeeping is a warning, not a resurrection.
@@ -420,16 +496,25 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
   `openAtDelete: true`; the next-boot sweep clears the tombstone even when
   `sessionKnown` is false, and the settings page filters queued ids out of its
   rows. `deferred/list` reports which queued ids are still `recoverable`;
-  `deferred/cancel` READS the queue, DROPS THE MARKER, then clears the tombstone
-  — **and rewrites the marker if the registry write fails** — and REFUSES entries
-  whose files are already gone
-  (`session/data-gone`) — which is why the cancel button's absence on cleaned-up
-  ids is a protocol rule, not a convention. Only `recoverable` ids get a Cancel
-  button; cleaned-up ids collapse into one summary line. `restoreSession` REFUSES
-  queued ids (`session/pending`); a RUNNING task is refused unless
-  `allowDeleteRunning`. `isOpen` alone decides the treatment (tombstone, pending
-  marker, `openAtDelete`). Rationale and rejected alternatives:
-  `docs/delete-semantics.md`.
+  `deferred/cancel` REFUSES an id that is not queued at all
+  (`session/not-pending` — see below), READS the queue, DROPS THE MARKER, then
+  clears the tombstone — **and rewrites the marker if the registry write fails** —
+  and REFUSES entries whose files are already gone (`session/data-gone`) — which
+  is why the cancel button's absence on cleaned-up ids is a protocol rule, not a
+  convention. Only `recoverable` ids get a Cancel button; cleaned-up ids collapse
+  into one summary line. `restoreSession` REFUSES queued ids (`session/pending`);
+  a RUNNING task is refused unless `allowDeleteRunning`. `isOpen` alone decides
+  the treatment (tombstone, pending marker, `openAtDelete`). Rationale and
+  rejected alternatives: `docs/delete-semantics.md`.
+  ⚠ **Cancelling is the one operation that puts a session BACK, so it requires
+  the id to actually be queued.** Without that guard a cancel of a merely
+  ARCHIVED id cleared its archive membership and returned success — a restore
+  nobody asked for, reachable from a stale client, a second window, a hand-made
+  request or two hosts on one home. `cancelPending` now answers
+  `session/not-pending` and touches nothing (not even an empty queue file);
+  `restoreSession`'s `session/pending` refusal is its mirror image. It comes
+  BEFORE the `session/data-gone` probe on purpose: for an id nobody queued, the
+  request itself is wrong, not the state of its files.
   ⚠ **The cancel's two durable writes are ordered marker-FIRST for a data-safety
   reason — do not "restore" the old tombstone-first order.** A crash or failure
   between them strands one of two states: "marker dropped, tombstone set" is
@@ -457,8 +542,28 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
   of aborting, because aborting mid-loop left the session half-detached, still
   archived and with its files intact — the "ungrouped resurrection" shape. An
   unusable registry still fails the delete at the archive-set write, which
-  reports `details.queued === true` when an open delete's marker is already
-  durable.
+  reports `details.queued === true` — for a COLD delete too, whose marker is now
+  equally durable.
+- **A COLD delete takes the same route and finishes inside the same call.** It
+  writes the marker before any mutation and puts the id in the archive set as a
+  tombstone, then disposes the files and — because no in-memory copy can outlive
+  it — clears the tombstone and drops the marker itself. A failure in the file
+  phase (or a throwing detach) leaves it tombstoned AND queued instead of
+  reporting a finished delete whose residue the sidebar would render as a live
+  session again; the boot sweep then finishes it (that is `finishDeferredDeletion`
+  doing exactly what it already did). The marker is what closed the crash window:
+  a cold delete used to write none, so a crash between the archive-set write and
+  the `rm` left a session that was un-archived, detached and unqueued while its
+  files stayed on disk — the next start listed it again as an ungrouped row and
+  this plugin could no longer list, restore or retry it. The corpus read inside
+  the file phase makes that window wide, not instantaneous. The ONE exception:
+  when the queue cannot be read at all, a cold delete still proceeds (the escape
+  hatch below) and REPORTS that it is not crash-safe; an OPEN delete still refuses
+  there, because its marker is the only thing that could finish it.
+  Regression cover: the four host tests around "a cold delete …" plus the
+  platform-aware "a file failure after bookkeeping is a warning, not an aborted
+  delete", which now asserts the tombstone+queue on Windows and the clean finish
+  on POSIX.
 - **ONE operation mutex serializes every durable mutation** (`withOperationLock`):
   both the read-modify-write pending-queue file (five entry points: boot
   timer sweep, ping sweep, `deferred/list` sweep, deletes, cancels) and the
@@ -521,8 +626,12 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
   `session-manager/internal`, and `pendingQueueUnreadable` logs at the point the
   error is created so no caller can swallow it silently (the ping sweep is
   fire-and-forget). The refusal is scoped to queue-dependent work: a COLD delete
-  writes no marker and reads no queue, so it still proceeds. Regression cover:
-  `test/host.test.mjs` ("an unreadable pending queue is refused…").
+  STILL PROCEEDS on an unreadable queue (that escape hatch is deliberate — it is
+  the only delete left when the file is corrupt) but now says so in its warnings,
+  because without a marker it is not crash-safe; an OPEN delete refuses, since its
+  marker is the only record that could finish it. Regression cover:
+  `test/host.test.mjs` ("an unreadable pending queue is refused…" and "a cold
+  delete still proceeds when the queue is unreadable, and says what that costs").
 - `sessionId` is validated by `SESSION_ID_PATTERN` at the **manager choke
   point** — `assertSessionId` is the first statement of `deleteSession`,
   `restoreSession` and `cancelPending`, so EVERY entry (RPC channel, agent
@@ -560,6 +669,12 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
   yields nothing and the `sessionListLimit` clamp is the only thing that ever
   exercises the merge. It is kept as a forward-compatible seam — do not document
   it as a working feature, and do not "fix" it by inventing a settings method.
+  ⚠ The host test's `settings` fake used to HAND the manager a `get()` the real
+  service does not have, and drove the clamp through it — the exact fake-shape
+  class this file warns about elsewhere. The fake is gone: the clamp is exercised
+  through the composition config (`createSessionManager(ctx, { sessionListLimit })`,
+  including `truncated`), and a settings service WITHOUT `get` is asserted to be
+  tolerated.
 - Client UI strings live in the inline `zh`/`en` locale dictionaries in
   `lib/client.js` — always add a key to **both**. Styling goes through the
   `TOKENS` map (dsw CSS variables with hardcoded fallbacks); the confirm dialog
@@ -569,6 +684,26 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
   `aria-labelledby` id (a fixed id would resolve to whichever overlay came
   first), and hands focus back to the element that opened it on close — the menu
   path's opener is unmounted by then, hence the `document.contains` check.
+  ⚠ **The cancel path has to fall forward too.** `finish()` runs the caller's
+  landing callback on a CONFIRMED decision; the menu item IS the opener and is
+  unmounted when the menu closes, so a cancel there used to leave focus on
+  `<body>` while the comment claimed otherwise. On cancel it now restores to a
+  live opener when there is one and otherwise runs the caller's callback — whose
+  menu-path version focuses the session ROW, which is the better target anyway.
+  ⚠ **The dialog's Escape must call `preventDefault()`.** The Settings panel is a
+  `useModalLayer` consumer whose document-level Escape handler bails out on
+  `event.defaultPrevented`; our capture-phase listener runs first, so without it
+  ONE Escape cancelled the dialog AND closed the Settings page behind it (and the
+  panel's focus restore then overrode ours).
+  ⚠ **Focus landing must skip DISABLED controls.** `focusAfterDelete` asks
+  `[data-sm-row-delete], [data-sm-bulk-delete]` — and the bulk button is first in
+  document order while being `disabled` with an empty selection, and `.focus()` on
+  a disabled control is a spec'd no-op, so the chain never reached the section
+  fallback and every confirmed row delete dropped focus on `<body>` (WCAG 2.4.3
+  again). The selector carries `:not([disabled])`, and the render test asserts
+  WHICH target was asked — an assertion that only counted focus requests passed
+  while this shipped. There is no `scripts/e2e-focus.mjs`; the browser half of
+  that check was never written and the suite is the coverage.
   ⚠ **Every card, row and toast must use the OPAQUE modal tokens, never the
   menu surface.** Measured on Windows: `--dsw-specific-menu` →
   `--dsw-menu-surface-fill` = `#f8f9fa94` (58% opaque) in light and `#43454a73`
@@ -585,7 +720,10 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
   actions = the `Button md` spec (36px tall, `--dsw-radius-md`, 14/22) with
   `RiskConfirmation`'s 72px/136px min-widths. `test/client.render.test.mjs`
   pins the tokens, and `scripts/e2e-dialog-style.mjs` compares the rendered
-  styles against the live official dialog (all 8 checks must pass).
+  styles against the live official dialog (all 8 checks must pass). The SAME rule
+  now covers the danger TEXT roles — see the contrast bullet above; a red WASH
+  behind danger text is unreadable by construction, so the failure banner uses the
+  opaque surface with a red border.
   Three lifecycle/feedback rules ride with it: (a) the overlay is attached
   inside a try/catch that resolves through the SAME "cancelled" channel as the
   degenerate-render check — a throw there used to leave `confirmOpen` set (every
@@ -602,6 +740,18 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
   silently dropped a partial delete's host warnings whenever its refresh also
   failed, and a swallowed `deferred/list` failure left a queued session
   rendered as an ordinary archived row with no feedback at all.
+  ⚠ **A bulk run must report the running sessions it SKIPPED.** `deleted` counted
+  only successes while the summary mentioned only deleted/failed, so confirming
+  five sessions and deleting two read as "deleted 2". The run now counts the
+  skips, adds them to the partial summary and to the success line, advances the
+  progress counter for them too, and — if every target turned running — never
+  returns in silence (the pre-flight refusal says the same thing when it fires).
+  ⚠ **The plain-DOM toast takes a `kind` (`'ok' | 'err'`) and is named
+  `plainToast`.** It used to paint every message in the error colour, so the menu
+  path's ONLY feedback channel drew a successful permanent delete exactly like a
+  failure; and sharing the name `toast` with the component-local
+  `toast(kind, text)` meant a one-argument call inside the component silently
+  produced a warning toast with `undefined` text.
 - Session ids are addressed only by exact **full session id** (index-based
   addressing was rejected with the old slash commands — indexes drift). The
   settings page filters out `origin === 'subagent'` rows.

@@ -832,10 +832,20 @@ async function renderMenuItem(options = {}) {
   }
   await act(async () => { root.render(React.createElement(menuItem(), props)) })
   await act(async () => { await settle() })
+  let mounted = true
   return {
     container,
     menuOpenCalls,
     item: () => container.querySelector('[role="menuitem"]'),
+    /** Unmount the row while its dialog is open — what the real menu does the
+     *  moment it closes, and the only faithful way to make the dialog's opener
+     *  genuinely unreachable (`document.contains(opener) === false`). Removing
+     *  the node by hand instead throws inside React's own teardown. */
+    unmount: async () => {
+      if (!mounted) return
+      mounted = false
+      await act(async () => { root.unmount() })
+    },
     cleanup: async () => {
       // Leaving a dialog open would strand the plugin's one-at-a-time guard
       // and silently neuter every later menu test.
@@ -845,7 +855,10 @@ async function renderMenuItem(options = {}) {
           await settle()
         })
       }
-      await act(async () => { root.unmount() })
+      if (mounted) {
+        mounted = false
+        await act(async () => { root.unmount() })
+      }
       container.remove()
       clearToasts()
     },
@@ -1071,11 +1084,14 @@ test('a confirmed delete ASKS a stable element for focus instead of dropping it 
   // on <body> — measured in the real GUI, and a WCAG 2.4.3 (Level A) failure.
   //
   // jsdom does not move `document.activeElement` for a programmatic `.focus()`
-  // on these elements, so asserting on activeElement here would be a test of
-  // jsdom rather than of the plugin. What IS observable — and what the fix
-  // actually does — is that the declared landing target is asked for focus, in
-  // preference to the opener. `document.activeElement` after a real click is
-  // verified in the browser instead (see scripts/e2e-focus.mjs).
+  // on every one of these elements, so asserting on activeElement here would be
+  // a test of jsdom rather than of the plugin. What IS observable — and what the
+  // fix controls — is WHICH element is asked for focus, in preference to the
+  // opener: never a disabled control, a surviving row's own control when there
+  // is one, and the section as the fallback. (This paragraph used to defer the
+  // real-browser half to `scripts/e2e-focus.mjs`, a file that was never
+  // written — which is how a fix whose only assertion was "something was asked"
+  // shipped broken.)
   const { sess, ws } = bulkFixture()
   const calls = []
   await withLayout(async () => {
@@ -1109,6 +1125,18 @@ test('a confirmed delete ASKS a stable element for focus instead of dropping it 
       assert.equal(calls.filter(([endpoint]) => endpoint === 'delete').length, 1, 'the delete actually ran')
       assert.ok(hits.length > 0,
         `focus was handed to a stable element (dialog still open: ${confirmOverlay() !== null}; activeElement: ${document.activeElement === null ? 'null' : document.activeElement.tagName})`)
+      // WHICH element matters, not just that one was asked: the bulk button is
+      // FIRST in document order and `disabled` with an empty selection, and
+      // `.focus()` on a disabled control is a spec'd no-op — so asking it left
+      // focus on `<body>` and made the section fallback unreachable. Asserting
+      // `hits.length > 0` alone passed while that bug shipped.
+      assert.ok(!hits.includes('bulk'),
+        `the disabled bulk button is never asked for focus (hits: ${JSON.stringify(hits)})`)
+      if (container.querySelectorAll('[data-sm-row-delete]').length > 0) {
+        assert.ok(hits.includes('row-delete'), `a surviving row's own control is preferred (hits: ${JSON.stringify(hits)})`)
+      } else {
+        assert.ok(hits.includes('section'), `with no row left, focus falls through to the section (hits: ${JSON.stringify(hits)})`)
+      }
     } finally {
       await cleanup()
     }
@@ -1996,6 +2024,129 @@ test('two pending-cancel buttons are distinguishable by name', async () => {
     // The id used to sit in an unassociated sibling <code>, so a screen reader
     // exposed two identical "cancel deletion" buttons.
     assert.deepEqual(names, [`pendingCancel ${ID2}`, `pendingCancel ${ID3}`])
+  } finally {
+    await cleanup()
+  }
+})
+
+// ── 0.4.8: keyboard ownership, the cancel-path focus, quiet skips, AA floor ──
+
+test('Escape in the confirm dialog CLAIMS the key, so the page behind it stays put', async () => {
+  // The Settings panel is a `useModalLayer` consumer (dsh-client-ui-settings-
+  // general) whose document-level Escape handler returns early when
+  // `event.defaultPrevented` is set. Our listener runs first — it is installed
+  // in the capture phase — and used to prevent nothing, so ONE Escape cancelled
+  // the dialog AND closed the whole Settings page behind it, whose own focus
+  // restore then overrode ours.
+  const { sess, ws } = bulkFixture()
+  const calls = []
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(idleRpc(calls), sess, ws)
+    try {
+      await act(async () => { rowDeleteButton(container).click(); await settle() })
+      assert.ok(confirmOverlay(), 'the dialog is up')
+      const event = new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+      await act(async () => { document.dispatchEvent(event); await settle() })
+      assert.equal(confirmOverlay(), null, 'the dialog closed')
+      assert.equal(event.defaultPrevented, true, 'and claimed the Escape — the exact condition the panel checks')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('cancelling the menu delete hands focus back instead of dropping it on <body>', async () => {
+  // The menu item IS the opener and it is unmounted the moment the menu closes,
+  // so the "restore to the opener" branch cannot work on this path: the caller's
+  // landing logic is the only thing standing between the user and `<body>`. The
+  // caller's own comment claimed it fell forward on cancel; it did not.
+  const menu = await renderMenuItem({ rpc: menuRpc([]), sessionId: ID })
+  try {
+    await withLayout(async () => {
+      const row = document.createElement('div')
+      row.setAttribute('data-row-key', `session:${ID}`)
+      document.body.appendChild(row)
+      let focused = 0
+      row.focus = () => { focused += 1 }
+
+      // A real click focuses the row, which is what makes it the dialog's
+      // opener; jsdom's `click()` does not, so say it explicitly.
+      menu.item().focus()
+      await act(async () => { menu.item().click(); await settle() })
+      assert.ok(confirmOverlay(), 'the dialog is up')
+      await menu.unmount() // the menu closed and took the opener with it
+      await act(async () => {
+        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+        await settle()
+      })
+      assert.equal(confirmOverlay(), null, 'the cancel landed')
+      assert.equal(focused, 1, 'and the row took focus back, because the opener was gone')
+    })
+  } finally {
+    await menu.cleanup()
+  }
+})
+
+test('a bulk run reports the running sessions it skipped', async () => {
+  // `deleted` counted only successes and the summary mentioned only
+  // deleted/failed, so confirming three sessions and deleting two read as
+  // "deleted 2" — the skip was invisible in the one line the user reads.
+  const { sess, ws } = bulkFixture()
+  const calls = []
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(idleRpc(calls), sess, ws)
+    try {
+      await act(async () => { selectAllBox(container).click() })
+      await act(async () => { bulkButton(container).click(); await settle() })
+      await confirmBulk(document.querySelector('[data-sm-confirm]'))
+      assert.deepEqual(calls.filter(([endpoint]) => endpoint === 'delete').map(([, id]) => id), [ID, ID2], 'the running row is never sent to the host')
+      assert.ok(container.textContent.includes('deleteBulkSkipped'), 'the summary says how many were skipped')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('the AA floor holds on the surfaces the contrast script cannot see', async () => {
+  // scripts/e2e-contrast.mjs samples three buttons on the OPAQUE card, so it
+  // cannot see: the error banner (a red wash over the card = 4.44:1 light /
+  // 3.94:1 dark, both under the floor), the link-style labels (the aliased
+  // accent = 4.24:1), the meta text (the aliased tertiary = 3.70:1), or the
+  // dialog's white-on-error-red (4.4976:1). These assertions pin the
+  // replacements, so "simplify it back to the token" now fails a test.
+  const base = OK_PING_AND_QUEUE()
+  const rpc = (endpoint) => {
+    if (endpoint === 'restore') return Promise.reject(Object.assign(new Error('session/not-found'), { code: 'session/not-found' }))
+    return base(endpoint)
+  }
+  const { sess, ws } = bulkFixture()
+  const { container, cleanup } = await renderSection(rpc, sess, ws)
+  try {
+    await withLayout(async () => {
+      // The banner is the failure channel, so its own text has to clear AA.
+      const restore = [...container.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'restore')
+    assert.ok(restore, 'the Restore control renders')
+    // jsdom's CSSOM normalizes the literals inside `light-dark(...)` to rgb(),
+    // so these pin the exact colour rather than the hex spelling.
+    assert.ok(restore.style.color.includes('light-dark(rgb(72, 104, 178)'), `link text: #4868b2 = 5.39:1 in light, not the token's 4.24:1 (${restore.style.color})`)
+    await act(async () => { restore.click(); await settle() })
+    const alert = container.querySelector('[role="alert"]')
+    assert.ok(alert, 'the failure is surfaced')
+    assert.ok(alert.style.color.includes('light-dark(rgb(220, 38, 38)'), `banner text: #dc2626 = 4.83:1 on the surface below (${alert.style.color})`)
+    assert.ok(alert.style.background.includes('--dsw-alias-bg-layer-2'), `banner background: the opaque card (${alert.style.background})`)
+    assert.ok(!alert.style.background.includes('hover-danger'), 'never the red wash (4.44:1 light / 3.94:1 dark)')
+    assert.ok(alert.style.border.includes('--dsw-alias-state-error-primary'), 'the red moved to the border, where the 3:1 graphic floor applies')
+
+    // The dialog's Delete button: white on the theme's #ec1313 is 4.4976:1 —
+    // under the floor by 0.002, and the very number this file cites as the
+    // reason that red cannot carry text.
+    await act(async () => { rowDeleteButton(container, 0).click(); await settle() })
+    const overlay = confirmOverlay()
+    assert.ok(overlay, 'the dialog is up')
+    const confirm = [...overlay.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'confirm')
+    assert.ok(confirm.style.background.includes('light-dark(rgb(220, 38, 38)'), `danger fill: #dc2626 = 4.83:1 in light (${confirm.style.background})`)
+    await escapeDialog()
+    })
   } finally {
     await cleanup()
   }

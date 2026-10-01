@@ -7,7 +7,7 @@
 import { mkdir } from 'node:fs/promises'
 import puppeteer from 'puppeteer-core'
 
-import { assertDisposableHome } from './e2e-guard.mjs'
+import { assertDisposableHome, assertInstanceServesHome } from './e2e-guard.mjs'
 
 const url = process.argv[2]
 const e2eHome = process.argv[3]
@@ -65,6 +65,8 @@ async function sidebarSessions() {
 
 await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
 await sleep(9000)
+// Prove the URL serves the approved home before this diagnostic deletes anything.
+await assertInstanceServesHome(page, e2eHome, { script: 'e2e-bug2' })
 console.log('[before] sidebar rows:', JSON.stringify(await sidebarSessions(), null, 1))
 
 // open settings -> section

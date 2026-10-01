@@ -35,8 +35,8 @@ dsh 进程内的那个会话对象**无法关闭**（无公开 API），于是�
 
 | sessionId | 磁盘产物 | 仍在 `session/list` |
 |---|---|---|
-| `session-a56c3963-0f1d-4283-880c-94d40e5fc22d` | 已删除 | 是 |
-| `session-f4a72b82-5b6f-4685-b2cd-0ed92a956a11` | 已删除 | 是 |
+| `session-a56c3963-…-94d40e5fc22d` | 已删除 | 是 |
+| `session-f4a72b82-…-0ed92a956a11` | 已删除 | 是 |
 
 同时 `~/.dsh/storages/`：
 
@@ -169,7 +169,7 @@ entry?.detach?.()                               // enter() 公开返回的 detac
 ## 7. 诊断过程的副作用说明
 
 - 为读取运行实例状态，用本机 `.credentials.yaml` 中的 `client-connection/browser-session` 签名密钥生成过一次**只读** cookie（仅本地 `127.0.0.1:3080`，未执行任何写操作）；
-- 真实 home 的唯一变化：诊断用浏览器客户端首次加载时，dsh 自身在 `session_manager` 工作区创建了一个空白占位会话 `session-2e7e9143-251c-470e-89d5-3bbd8ddcc950`（`blank`、无消息，下次"新会话"会被 `reuseBlank` 复用），写入时间 21:12:32；
+- 真实 home 的唯一变化：诊断用浏览器客户端首次加载时，dsh 自身在 `session_manager` 工作区创建了一个空白占位会话 `session-2e7e9143-…-3bbd8ddcc950`（`blank`、无消息，下次"新会话"会被 `reuseBlank` 复用），写入时间 21:12:32；
 - 隔离复现 home 位于 `%TEMP%\dsh-sm-e2e`，3099 实例已停止，可直接删除。
 
 ---

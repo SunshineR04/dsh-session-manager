@@ -6,9 +6,10 @@
 // MUTATING: its fallback path POSTs `session-manager/restore`, which changes the
 // archive set, so it must run against a seeded disposable home only.
 // Run: node scripts/e2e-dialog-style.mjs <url> <e2e-home-win-path> [<screenshot-dir>]
+import { mkdir } from 'node:fs/promises'
 import puppeteer from 'puppeteer-core'
 
-import { assertDisposableHome } from './e2e-guard.mjs'
+import { assertDisposableHome, assertInstanceServesHome } from './e2e-guard.mjs'
 
 const url = process.argv[2]
 const e2eHome = process.argv[3]
@@ -17,6 +18,10 @@ if (!url || !e2eHome) {
   console.error('usage: node scripts/e2e-dialog-style.mjs <url> <e2e-home-win-path> [<screenshot-dir>]')
   process.exit(2)
 }
+// A run failed here with ENOENT on the first screenshot: the script took a
+// screenshot directory but never created it, so a fresh path crashed the run
+// half-way through (every other script mkdirs its own).
+if (shotDir !== null) await mkdir(shotDir, { recursive: true })
 // A URL alone cannot prove which home the instance serves: refuse anything but
 // a home scripts/e2e-seed.mjs created (see scripts/e2e-guard.mjs).
 try {
@@ -138,6 +143,9 @@ const clickMenuItem = (fragment) => page.evaluate((needle) => {
 
 await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
 await sleep(9000)
+// This script restores an archived session on its fallback path, so the URL has
+// to be proven to serve the approved home first (see scripts/e2e-guard.mjs).
+await assertInstanceServesHome(page, e2eHome, { script: 'e2e-dialog-style' })
 await page.evaluate(() => {
   const button = [...document.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === '继续')
   if (button !== undefined) button.click()

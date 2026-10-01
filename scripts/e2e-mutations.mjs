@@ -9,7 +9,7 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import puppeteer from 'puppeteer-core'
 
-import { assertDisposableHome } from './e2e-guard.mjs'
+import { assertDisposableHome, assertInstanceServesHome } from './e2e-guard.mjs'
 
 const url = process.argv[2]
 const e2eHome = process.argv[3]
@@ -76,6 +76,11 @@ async function closeSettings() {
 console.log(`[goto] ${url.slice(0, 70)}...`)
 await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
 await sleep(9000)
+// Bind the INSTANCE to the home that was just approved, before anything is
+// clicked: `assertDisposableHome` proves the home is throwaway, not that this
+// URL serves it, and pointing this script at a real instance is how the real
+// sessions get deleted (see scripts/e2e-guard.mjs).
+await assertInstanceServesHome(page, e2eHome, { script: 'e2e-mutations' })
 await shot('m01-boot')
 
 // ── 1. red menu item computed style ─────────────────────────────────────────

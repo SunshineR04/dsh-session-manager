@@ -105,14 +105,24 @@ const MEASURE = () => {
     return { label, color: cs.color, fontPx: parseFloat(cs.fontSize), ...paintedSurface(el) }
   }
   const buttons = [...document.querySelectorAll('button')]
-  return [
-    sample('row delete', buttons.find((b) => /^(彻底删除|Delete permanently)$/.test((b.textContent || '').trim()))),
-    sample('bulk delete', buttons.find((b) => /删除选中|Delete .* selected/.test(b.textContent || ''))),
-    sample('refresh (control)', buttons.find((b) => /^(刷新|Refresh)$/.test((b.textContent || '').trim()))),
-  ].filter((entry) => entry !== null)
+  const rowDelete = buttons.find((b) => /^(彻底删除|Delete permanently)$/.test((b.textContent || '').trim()))
+  return {
+    // Whether the ARCHIVED ROW rendered at all. The header's bulk-delete and
+    // Refresh buttons render on an empty archive set too, so "we measured
+    // something" is not the same question — and the docs promise exit 2 when
+    // there is nothing to measure.
+    hasRowDelete: rowDelete !== undefined,
+    samples: [
+      sample('row delete', rowDelete),
+      sample('bulk delete', buttons.find((b) => /删除选中|Delete .* selected/.test(b.textContent || ''))),
+      sample('refresh (control)', buttons.find((b) => /^(刷新|Refresh)$/.test((b.textContent || '').trim()))),
+    ].filter((entry) => entry !== null),
+  }
 }
 
 const results = []
+// How many passes actually saw the archived ROW (not just the header controls).
+let rowSamples = 0
 for (const scheme of ['dark', 'light']) {
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: scheme }])
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
@@ -123,12 +133,13 @@ for (const scheme of ['dark', 'light']) {
   if (shotDir !== null) await page.screenshot({ path: `${shotDir}/contrast-${scheme}.png` })
 
   const measured = await page.evaluate(MEASURE)
-  if (measured.length === 0) {
+  if (measured.hasRowDelete) rowSamples += 1
+  if (measured.samples.length === 0) {
     console.log(`[${scheme}] nothing to measure — no archived row rendered (seed a home with an archived session)`)
     continue
   }
   console.log(`\n=== ${scheme} theme ===`)
-  for (const entry of measured) {
+  for (const entry of measured.samples) {
     const fg = parseColor(entry.color)
     const bg = parseColor(entry.bg)
     if (fg === null || bg === null) {
@@ -149,8 +160,8 @@ for (const scheme of ['dark', 'light']) {
 
 await browser.close()
 
-if (results.length === 0) {
-  console.error('\nno measurements taken — the seeded home needs an ARCHIVED session for the settings page to render a row')
+if (results.length === 0 || rowSamples === 0) {
+  console.error('\nno archived ROW was measured — the seeded home needs an ARCHIVED session for the settings page to render one. The header\'s bulk-delete and Refresh buttons render on an empty archive set too, so measuring them alone is not the acceptance this script promises.')
   process.exit(2)
 }
 // Every danger-text surface this plugin paints must clear AA at its own size.
