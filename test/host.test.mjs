@@ -316,6 +316,239 @@ test('deleteSession removes files, archive entry and workspace accounting', asyn
   assert.deepEqual(leftovers, [])
 })
 
+test('a permanent delete takes the whole subagent subtree, deepest first', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers, state, persistedStates, events } = makeCtx({ fixture })
+  const projectDir = join(fixture.sessionsRoot, `--${CWD.replace(/[\\/:]/g, '-')}--`)
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  // root → child → grandchild, plus a second child: the closure has to reach the
+  // grandchild, and the order has to put it first so a crash never strands it.
+  headers.set('child-a', { id: 'child-a', cwd: CWD, parentSession: SESSION_ID, origin: 'subagent' })
+  headers.set('grandchild', { id: 'grandchild', cwd: CWD, parentSession: 'child-a', origin: 'subagent' })
+  headers.set('child-b', { id: 'child-b', cwd: CWD, parentSession: SESSION_ID, origin: 'subagent' })
+  for (const id of [SESSION_ID, 'child-a', 'grandchild', 'child-b']) await writeSessionFiles(fixture, id, { bak: true })
+
+  let listCalls = 0
+  const originalList = ctx.services.sessionPersistence.list
+  ctx.services.sessionPersistence.list = async (...args) => {
+    listCalls += 1
+    return originalList(...args)
+  }
+
+  const manager = createSessionManager(ctx, {})
+  const result = await manager.deleteSession(SESSION_ID)
+
+  assert.equal(result.deleted, true)
+  assert.deepEqual(result.subagents.total, 3)
+  // Deepest first: the grandchild, then the child that owns it, then the second
+  // child — and the TARGET last (visible in the tombstone write order below).
+  assert.deepEqual([...result.subagents.sessionIds].sort(), ['child-a', 'child-b', 'grandchild'])
+  for (const id of [SESSION_ID, 'child-a', 'grandchild', 'child-b']) {
+    assert.equal(existsSync(join(projectDir, id)), false, `${id} artifact removed`)
+  }
+  const projcacheDir = join(fixture.storagesRoot, 'session_projcache', 'sessions')
+  assert.deepEqual((await readdir(projcacheDir)).filter((name) => ['child-a', 'grandchild', 'child-b', SESSION_ID].some((id) => name.startsWith(id))), [])
+  assert.deepEqual(state.archivedSessionIds, [], 'no tombstone survives the cascade')
+  assert.deepEqual(await manager.readPending(), [], 'every marker was cleared inline (all four were cold)')
+  for (const id of [SESSION_ID, 'child-a', 'grandchild', 'child-b']) {
+    assert.ok(events.some(([event, body]) => event === 'api-session/removed' && body === id), `${id} removal broadcast`)
+  }
+
+  // The deletion ORDER, read off the durable writes: each cold session's
+  // tombstone is added before its files go, so first-appearance order IS the
+  // deletion order.
+  const firstAppearance = []
+  for (const snapshot of persistedStates) {
+    for (const id of snapshot.archivedSessionIds) {
+      if (id !== SESSION_ID && !firstAppearance.includes(id)) firstAppearance.push(id)
+    }
+  }
+  // The root is archived in this fixture from the start, so it never appears as
+  // an ADD; its own write is the FINAL flat-[] state, which must come after every
+  // child's writes — that is the "target last" half of the order.
+  assert.deepEqual(firstAppearance, ['grandchild', 'child-a', 'child-b'], 'deepest first, never the parent before its child')
+  assert.deepEqual(persistedStates.at(-1).archivedSessionIds, [], 'the target is processed last: its tombstone clear is the final write')
+
+  // ONE corpus read for the whole cascade: discovery and all four file phases
+  // share the index (`artifactIndex()` decompresses every stored header).
+  assert.equal(listCalls, 1)
+})
+
+test('a running subagent descendant refuses the whole delete and touches nothing', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers, state, live } = makeCtx({ fixture })
+  const projectDir = join(fixture.sessionsRoot, `--${CWD.replace(/[\\/:]/g, '-')}--`)
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  headers.set('child-a', { id: 'child-a', cwd: CWD, parentSession: SESSION_ID, origin: 'subagent' })
+  await writeSessionFiles(fixture, SESSION_ID)
+  await writeSessionFiles(fixture, 'child-a')
+  live.set('child-a', {})
+  ctx.services.agents = { get: (id) => (id === 'child-a' ? { status: 'running' } : undefined) }
+  const manager = createSessionManager(ctx, {})
+
+  await assert.rejects(manager.deleteSession(SESSION_ID), (error) => {
+    assert.equal(error.code, 'session/running')
+    assert.deepEqual(error.details.runningSubagents, ['child-a'])
+    assert.match(error.message, /subagent/)
+    return true
+  })
+  assert.equal(existsSync(join(projectDir, SESSION_ID)), true, 'the target is untouched')
+  assert.equal(existsSync(join(projectDir, 'child-a')), true, 'the running child is untouched')
+  assert.deepEqual(state.archivedSessionIds, [SESSION_ID])
+  assert.deepEqual(await manager.readPending(), [])
+
+  // `allowDeleteRunning` is the documented override, and it is one decision for
+  // the whole subtree.
+  const forced = createSessionManager(ctx, { allowDeleteRunning: true })
+  const result = await forced.deleteSession(SESSION_ID)
+  assert.equal(result.deleted, true)
+  assert.deepEqual(result.subagents.sessionIds, ['child-a'])
+})
+
+test('cascadeSubagents: false deletes exactly the id it was given', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers } = makeCtx({ fixture })
+  const projectDir = join(fixture.sessionsRoot, `--${CWD.replace(/[\\/:]/g, '-')}--`)
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  headers.set('child-a', { id: 'child-a', cwd: CWD, parentSession: SESSION_ID, origin: 'subagent' })
+  await writeSessionFiles(fixture, SESSION_ID)
+  await writeSessionFiles(fixture, 'child-a')
+  const manager = createSessionManager(ctx, { cascadeSubagents: false })
+
+  const result = await manager.deleteSession(SESSION_ID)
+  assert.equal(result.subagents, undefined)
+  assert.equal(existsSync(join(projectDir, SESSION_ID)), false)
+  assert.equal(existsSync(join(projectDir, 'child-a')), true, 'the child is left alone')
+})
+
+test('a session that merely names the target as its parent is NOT a subagent', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers } = makeCtx({ fixture })
+  const projectDir = join(fixture.sessionsRoot, `--${CWD.replace(/[\\/:]/g, '-')}--`)
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  // Same parentSession, no subagent origin: upstream allows exactly one origin
+  // value, so this is a forked/independent session and must survive.
+  headers.set(OTHER_ID, { id: OTHER_ID, cwd: CWD, parentSession: SESSION_ID })
+  await writeSessionFiles(fixture, SESSION_ID)
+  await writeSessionFiles(fixture, OTHER_ID)
+  const manager = createSessionManager(ctx, {})
+
+  const result = await manager.deleteSession(SESSION_ID)
+  assert.equal(result.subagents, undefined)
+  assert.equal(existsSync(join(projectDir, OTHER_ID)), true)
+})
+
+test('an OPEN subagent descendant is tombstoned, queued, and finished by the boot sweep', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers, state, live } = makeCtx({ fixture })
+  const projectDir = join(fixture.sessionsRoot, `--${CWD.replace(/[\\/:]/g, '-')}--`)
+  headers.set(SESSION_ID, { id: SESSION_ID, cwd: CWD })
+  headers.set('child-a', { id: 'child-a', cwd: CWD, parentSession: SESSION_ID, origin: 'subagent' })
+  await writeSessionFiles(fixture, SESSION_ID)
+  await writeSessionFiles(fixture, 'child-a')
+  live.set('child-a', {})
+  const manager = createSessionManager(ctx, {})
+
+  const result = await manager.deleteSession(SESSION_ID)
+  assert.equal(result.openAtDelete, undefined, 'the target itself was cold')
+  assert.deepEqual(result.subagents.sessionIds, ['child-a'])
+  assert.equal(existsSync(join(projectDir, 'child-a')), false, 'the open child lost its files immediately')
+  assert.ok(state.archivedSessionIds.includes('child-a'), 'its tombstone hides the lingering summary')
+  assert.deepEqual(await manager.readPending(), ['child-a'], 'and it is queued for the next-boot finish-up')
+
+  // Cold again → the sweep finishes it. The root is already gone from the queue
+  // (its own cold delete dropped its marker inline).
+  live.delete('child-a')
+  await manager.sweepPending()
+  assert.deepEqual(state.archivedSessionIds, [])
+  assert.deepEqual(await manager.readPending(), [])
+})
+
+
+test('orphans/list reports unreachable subagent sessions and holds fresh ones back', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers } = makeCtx({ fixture })
+  const projectDir = join(fixture.sessionsRoot, `--${CWD.replace(/[\\/:]/g, '-')}--`)
+  headers.set('root', { id: 'root', cwd: CWD })
+  headers.set('kid', { id: 'kid', cwd: CWD, parentSession: 'root', origin: 'subagent' })
+  headers.set('orphan', { id: 'orphan', cwd: CWD, parentSession: 'gone', origin: 'subagent' })
+  headers.set('orphan-kid', { id: 'orphan-kid', cwd: CWD, parentSession: 'orphan', origin: 'subagent' })
+  for (const id of ['root', 'kid', 'orphan', 'orphan-kid']) await writeSessionFiles(fixture, id)
+
+  // Grace 0: everything is old enough. The closure must reach the GRANDCHILD,
+  // whose parent (the orphan itself) is still on disk.
+  const impatient = createSessionManager(ctx, { orphanGraceHours: 0 })
+  const listed = await impatient.listOrphans()
+  assert.deepEqual([...listed.sessionIds].sort(), ['orphan', 'orphan-kid'])
+  assert.equal(listed.total, 2)
+  assert.ok(Number.isFinite(listed.bytes) && listed.bytes >= 0)
+  assert.equal(listed.held, 0)
+  assert.ok(!listed.sessionIds.includes('kid'), 'a child whose parent still exists is not an orphan')
+
+  // Default grace (24h): these artifacts were written a moment ago, so both are
+  // held back rather than offered for irreversible deletion.
+  const patient = createSessionManager(ctx, {})
+  const held = await patient.listOrphans()
+  assert.deepEqual(held.sessionIds, [])
+  assert.equal(held.held, 2)
+  assert.equal(held.graceHours, 24)
+  assert.equal(existsSync(join(projectDir, 'orphan')), true, 'listing never touches the disk')
+})
+
+test('orphans/delete takes the orphan subtree, deepest first, and refuses anything else', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers, events } = makeCtx({ fixture })
+  const projectDir = join(fixture.sessionsRoot, `--${CWD.replace(/[\\/:]/g, '-')}--`)
+  headers.set('root', { id: 'root', cwd: CWD })
+  headers.set('orphan', { id: 'orphan', cwd: CWD, parentSession: 'gone', origin: 'subagent' })
+  headers.set('orphan-kid', { id: 'orphan-kid', cwd: CWD, parentSession: 'orphan', origin: 'subagent' })
+  for (const id of ['root', 'orphan', 'orphan-kid']) await writeSessionFiles(fixture, id, { bak: true })
+  const manager = createSessionManager(ctx, { orphanGraceHours: 0 })
+
+  // An id that is NOT an orphan: refused outright when it is the only one.
+  await assert.rejects(manager.deleteOrphans(['root']), (error) => {
+    assert.equal(error.code, 'bad-request')
+    assert.deepEqual(error.details.sessionIds, ['root'])
+    return true
+  })
+  assert.equal(existsSync(join(projectDir, 'root')), true, 'the refusal deleted nothing')
+
+  // Mixed request: the eligible id goes, the ineligible one is REPORTED.
+  const result = await manager.deleteOrphans(['orphan', 'root'])
+  assert.deepEqual(result.sessionIds, ['orphan-kid', 'orphan'], 'the subtree goes deepest-first')
+  assert.ok(result.warnings.some((line) => line.includes('"root"')), 'the skipped id is named')
+  for (const id of ['orphan', 'orphan-kid']) {
+    assert.equal(existsSync(join(projectDir, id)), false, `${id} artifact removed`)
+  }
+  assert.equal(existsSync(join(projectDir, 'root')), true)
+  const projcacheDir = join(fixture.storagesRoot, 'session_projcache', 'sessions')
+  assert.deepEqual((await readdir(projcacheDir)).filter((name) => name.startsWith('orphan')), [])
+  for (const id of ['orphan', 'orphan-kid']) {
+    assert.ok(events.some(([event, body]) => event === 'api-session/removed' && body === id), `${id} removal broadcast`)
+  }
+  // With everything gone the list is empty, and a second call refuses.
+  assert.deepEqual((await manager.listOrphans()).sessionIds, [])
+  await assert.rejects(manager.deleteOrphans(['orphan']), (error) => error.code === 'bad-request')
+})
+
+test('an id that became reachable again is not deleted by a stale orphan request', async () => {
+  const fixture = await makeFixture()
+  const { ctx, headers } = makeCtx({ fixture })
+  const projectDir = join(fixture.sessionsRoot, `--${CWD.replace(/[\\/:]/g, '-')}--`)
+  headers.set('orphan', { id: 'orphan', cwd: CWD, parentSession: 'gone', origin: 'subagent' })
+  await writeSessionFiles(fixture, 'orphan')
+  const manager = createSessionManager(ctx, { orphanGraceHours: 0 })
+  assert.deepEqual((await manager.listOrphans()).sessionIds, ['orphan'])
+
+  // The parent comes back (a restored home, a re-indexed header): the id is no
+  // longer an orphan, so the delete recomputes and refuses instead of trusting
+  // the caller's snapshot.
+  headers.set('gone', { id: 'gone', cwd: CWD })
+  await assert.rejects(manager.deleteOrphans(['orphan']), (error) => error.code === 'bad-request')
+  assert.equal(existsSync(join(projectDir, 'orphan')), true)
+})
+
+
 test('deleteSession removes an open idle session at once, tombstoned until the boot sweep', async () => {
   const fixture = await makeFixture()
   const { ctx, headers, state, events } = makeCtx({ fixture })

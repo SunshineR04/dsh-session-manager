@@ -24,8 +24,9 @@ from running model steps. Use those — this plugin does not try to replace them
 | --- | --- | --- |
 | Archive / unarchive | ✅ ⋯ menu, stop-work confirm, undo toast | ✅ |
 | Find archived sessions | ✅ sidebar **Show archived** filter | ✅ one list across **all** workspaces |
-| **Delete session files** | ❌ never | ✅ red **Delete permanently** |
+| **Delete session files** | ❌ never | ✅ red **Delete permanently** (also its subagent sessions and their descendants, deepest first, by default) |
 | Bulk operations | ❌ | ✅ select all + delete in one confirmed run |
+| Reclaim **orphan subagent sessions** | ❌ | ✅ one-click cleanup block on the settings page |
 
 Every delete is a **direct physical deletion** — there is no backup layer.
 
@@ -45,6 +46,16 @@ Every delete is a **direct physical deletion** — there is no backup layer.
   failed, or all-running refused
 - Destructive confirm dialog — every delete is a direct physical delete,
   there is no backup layer
+- **Delete permanently also takes the session's subagent sessions and theirs**
+  (deepest first, the session itself last; `cascadeSubagents: false` turns it
+  off). Subagent sessions have no surface anywhere in dsh, so the result line
+  says "including N subagent session(s)" — the only place you can learn they
+  existed
+- **Orphan subagent sessions** — children whose parent no longer exists and that
+  no view lists — are reported with their count and size and can be cleaned up in
+  one confirmed action. Anything younger than `orphanGraceHours` (24 h) is
+  deliberately not offered, so a session still being written never looks like
+  residue
 - Backed by the official session / workspace client stores — fully reactive
 
 ### 2. Session context menu: red "Delete permanently"
@@ -122,11 +133,27 @@ bundle channel above is easier):
 
 Deleting runs in this order:
 
-1. **Open sessions only**: a persistent pending-deletion marker is written
-   **before any mutation** (crash safety — a crash mid-delete always leaves
-   the next boot a marker to sweep), right after the read-only existence
-   check; malformed ids read back from that queue file are pattern-validated
-   before any filesystem use.
+0. **Its subagent sessions go first (on by default, `cascadeSubagents: true`)**:
+   the whole subagent subtree is deleted **deepest first**, and the session you
+   clicked is deleted **last**. The link comes from the persisted header
+   (`parentSession` plus `origin === 'subagent'` — upstream allows exactly that
+   one origin value, so a forked or independent session can never be swept up)
+   and it is **recursive**: subagents that spawned their own subagents go too.
+   Why a cascade at all: dsh's sidebar filters `origin === 'subagent'` at render
+   time and this plugin's settings page filters them as well, so a child left
+   behind has **no surface at all** — no row to click, no listing that carries
+   it, and the agent tool refuses a non-archived id. A field home had accumulated
+   68 such orphans (23 MB) that way.
+   Deepest-first is deliberate: after a crash, every remaining child still has
+   its parent on disk, so re-running the delete finds it again — deleting the
+   parent first would strand its children as exactly the orphan shape this
+   removes. A child with a RUNNING task refuses the whole delete
+   (`allowDeleteRunning` overrides it; one decision covers the subtree).
+1. **Pending marker (crash safety)**: a persistent pending-deletion marker is
+   written **before any mutation**, right after the read-only existence check —
+   for a COLD delete too (since 0.4.8), so a crash mid-delete always leaves the
+   next boot a marker to sweep; malformed ids read back from that queue file are
+   pattern-validated before any filesystem use.
 2. **Registry bookkeeping (durable + broadcast)**: detaches the id from
    its workspace's `sessionIds` and — for a **cold** session — removes it from
    the global archive set. (An **open** session deliberately keeps/adds the id
@@ -144,9 +171,16 @@ Deleting runs in this order:
 4. Removes the metadata checkpoint
    `~/.dsh/storages/session_projcache/sessions/<id>.json` (and `.bak-*`).
 5. **Broadcasts the official `api-session/removed` event**, so every connected
-   client drops the session from its list store immediately. (The host itself
-   only emits this event when a live session is disposed, which a cold delete
-   never is.)
+   client drops the session from its list store immediately (once per cascaded
+   subagent too — the official sidebar filters them at RENDER time, not at store
+   time). (The host itself only emits this event when a live session is
+   disposed, which a cold delete never is.)
+
+The number of cascaded sessions is reported in the result
+(`subagents.sessionIds`) and named in the menu toast, the settings-page summary
+and the agent tool's reply ("including N subagent session(s)") — the only place
+a user can learn they existed. `cascadeSubagents: false` restores "delete
+exactly the id you asked for".
 
 The SQLite search index reconciles itself once the source files are gone;
 attachments are content-addressed and intentionally kept.
@@ -236,6 +270,8 @@ attachments are content-addressed and intentionally kept.
 | --- | --- | --- |
 | `sessionListLimit` | `500` | Max entries per list call |
 | `allowDeleteRunning` | `false` | Force-delete sessions with a **running** task (skips only the refusal — a forced delete is still tombstoned and queued; dangerous) |
+| `cascadeSubagents` | `true` | A permanent delete also removes that session's subagent sessions and their descendants, deepest first (they have no UI surface at all — see "Delete semantics"). A running descendant refuses the whole delete unless `allowDeleteRunning` is on; set `false` to delete exactly the id you asked for |
+| `orphanGraceHours` | `24` | How old an orphan subagent session must be before the settings page offers it for cleanup (an orphan's parent is known to no source at all) |
 | `toolDeleteRequiresConfirm` | `true` | Agent delete tool requires `confirm: true` |
 | `menuDeleteAvailable` | `true` | Mount the red menu item |
 | `reannouncePendingRemovals` | `true` | On every pending-queue read, re-announce `api-session/removed` for queued ids whose session is still live, so even a "show archived" sidebar stops rendering the residue (set `false` for the tombstone-only behavior — see "Delete semantics") |

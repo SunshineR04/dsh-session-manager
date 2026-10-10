@@ -12,6 +12,78 @@ so a change that requires a newer dsh host says so explicitly.
 
 Nothing yet.
 
+## [0.5.0] - 2026-10-11
+
+Field-driven: a user deleted every conversation they could see and still had 90
+session artifacts occupying 36 MB. **79 of them were subagent sessions** — 28 MB
+invisible from every surface, 43 of those (20 MB) orphaned by the deletion of
+their parent. This release makes a permanent delete take its subagent subtree with
+it, and adds the one place the residue that already existed can be reclaimed.
+
+### Changed — a permanent delete cascades over the subagent subtree (`cascadeSubagents`)
+
+- **Deleting a session now deletes its subagent sessions, and theirs, deepest
+  first, with the session itself last** — new config `cascadeSubagents`, default
+  **true** (`false` restores "delete exactly the id you asked for"). The relation
+  is the persisted header's `parentSession` plus `origin === 'subagent'`, which
+  upstream validates as the ONLY origin value, so a forked or otherwise
+  independent session can never be swept up; the closure is recursive, because a
+  subagent that spawned subagents leaves children whose parent is still on disk.
+  Deepest-first is a crash property, not a detail: a crash mid-cascade leaves
+  every remaining child with its parent still present, so the next attempt finds
+  it again — the reverse order manufactures exactly the orphans this removes.
+- **A running descendant refuses the whole delete** (`session/running`, with
+  `details.runningSubagents`) unless `allowDeleteRunning` is on: half a subtree is
+  worse than a refusal. Only the TARGET keeps the `session/not-found` gate and the
+  fatal tombstone-write behaviour; a descendant's registry failure is a labelled
+  warning and the boot sweep finishes it, so one odd child cannot strand its
+  siblings.
+- **Why this is on by default**: dsh's sidebar returns `false` for
+  `origin === 'subagent'` at RENDER time, the settings page filters the same
+  origin, and the agent tool refuses a non-archived id — a child left behind has
+  no row, no listing and no tool, i.e. it is unreachable, not merely hidden. The
+  field home had accumulated 68 orphans (23.1 MB) across 43 first-level children
+  and **25 grandchildren**, which is why the discovery is a closure.
+- The cascade is **reported, never silent**: `delete` returns
+  `subagents: { total, sessionIds }`, the menu toast, the row toast and the bulk
+  summary all say "including N subagent session(s)" (the bulk run SUMS over its
+  targets), the agent tool's reply carries the same field, and
+  `api-session/removed` is emitted for every cascaded id.
+- New pure module `lib/subagent-tree.js` (`subagentChildrenOf`,
+  `subagentDescendants`, `orphanSubagentClosure`) with its own suite, so the
+  relationship, the order and the closure are unit-tested host-free.
+
+### Added — the orphan cleanup block on the settings page
+
+- **`orphans/list` / `orphans/delete`**, surfaced as a settings-page block that
+  names how many orphan subagent sessions exist, how much disk they hold, and
+  cleans them up after one confirmation. An orphan is a subagent session whose
+  parent id is known to NO source (corpus listing or controller) — the residue of
+  a deletion made with the cascade off, by an older version, or outside this
+  plugin. It is the same closure as the cascade's, so grandchildren are found too.
+- **A grace period (`orphanGraceHours`, default 24 h)**, measured from the
+  artifact directory's mtime: a session that is still being written is never
+  offered for irreversible deletion, and the block says how many are held back and
+  why. An orphan with no artifact directory left is held back as well.
+- **The delete recomputes the list on the host and never trusts the request**: an
+  id that became reachable again is skipped and reported, and a request whose ids
+  are all ineligible is refused (`bad-request`). Deleting through this path uses
+  the same per-id body as any other delete (marker, bookkeeping, files,
+  projcache, removal broadcast) with the target-last ordering per subtree.
+- The block hides itself when there is nothing to clean, and a failed read keeps
+  it hidden with a console warning rather than painting the failure banner — an
+  auxiliary cleanup affordance must never look like a guarantee.
+
+### Verification
+
+- 227 tests, 0 fail, 0 skipped locally (was 200 at 0.4.9): +4 pure cases for the
+  orphan closure, +3 host cases (list/grace/hold-back, subtree delete with a
+  mixed request, the stale-request refusal), +4 render cases (the block, the
+  confirm + host call + reload, the empty case, the grace note, the failed read).
+- The measured field home, before/after: 90 artifacts / 36.3 MB → 22 artifacts /
+  13.2 MB after cleaning 68 orphans (43 + 25 grandchildren); the 11 top-level
+  sessions and the 11 subagents whose parent still exists were untouched.
+
 ## [0.4.9] - 2026-10-02
 
 Closes the one case CI failed on when v0.4.8 was tagged. Tooling only: `scripts/`

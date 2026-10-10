@@ -2107,6 +2107,191 @@ test('a bulk run reports the running sessions it skipped', async () => {
   })
 })
 
+test('the menu success line reports the subagent sessions the cascade removed', async () => {
+  // The user never sees a subagent row (dsh filters `origin === 'subagent'` at
+  // render time and this section filters it too), so the count on the success
+  // line is the only evidence that anything else went with the session.
+  const calls = []
+  const { item, cleanup } = await renderMenuItem({
+    rpc: menuRpc(calls, (payload) => Promise.resolve({
+      sessionId: payload.sessionId,
+      deleted: true,
+      subagents: { total: 2, sessionIds: ['sub-1', 'sub-2'] },
+    })),
+    translate: (key) => (key === 'subagentsIncluded' ? 'sub:{n}' : key),
+  })
+  await withLayout(async () => {
+    try {
+      await act(async () => { item().click(); await settle() })
+      await act(async () => { dialogButton(confirmOverlay(), 'confirm').click(); await settle() })
+      const text = toasts().map((node) => node.textContent).join(' | ')
+      assert.ok(text.includes('deleteOk'), 'the delete is still reported')
+      assert.ok(text.includes('sub:2'), 'and it says how many subagent sessions went with it')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('a delete with no cascade leaves the success line exactly as it was', async () => {
+  const calls = []
+  const { item, cleanup } = await renderMenuItem({
+    rpc: menuRpc(calls),
+    translate: (key) => (key === 'subagentsIncluded' ? 'sub:{n}' : key),
+  })
+  await withLayout(async () => {
+    try {
+      await act(async () => { item().click(); await settle() })
+      await act(async () => { dialogButton(confirmOverlay(), 'confirm').click(); await settle() })
+      const text = toasts().map((node) => node.textContent).join(' | ')
+      assert.ok(text.includes('deleteOk'))
+      assert.ok(!text.includes('sub:'), 'no stray separator when the host reports no cascade')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('the section row delete reports the subagent sessions it cascaded', async () => {
+  const calls = []
+  const { sess, ws } = bulkFixture()
+  const rpc = idleRpc(calls, (payload) => Promise.resolve({
+    sessionId: payload.sessionId,
+    deleted: true,
+    subagents: { total: 2, sessionIds: ['sub-1', 'sub-2'] },
+  }))
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(rpc, sess, ws, {
+      t: (key) => (key === 'subagentsIncluded' ? 'sub:{n}' : key),
+    })
+    try {
+      await act(async () => { rowDeleteButton(container).click(); await settle() })
+      await act(async () => { dialogButton(confirmOverlay(), 'confirm').click(); await settle() })
+      assert.ok(container.textContent.includes('deleteOk'), 'the delete is still reported')
+      assert.ok(container.textContent.includes('sub:2'), 'and it names the cascade')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('a bulk run ADDS UP the cascaded subagent sessions instead of reporting one row', async () => {
+  const calls = []
+  const { sess, ws } = bulkFixture()
+  // ID cascades 2, ID2 cascades 3, ID3 is running and skipped: the run must say
+  // 5, not 2 (one row) and not 0 (the field never read).
+  const rpc = idleRpc(calls, (payload) => Promise.resolve({
+    sessionId: payload.sessionId,
+    deleted: true,
+    subagents: payload.sessionId === ID
+      ? { total: 2, sessionIds: ['sub-1', 'sub-2'] }
+      : { total: 3, sessionIds: ['sub-3', 'sub-4', 'sub-5'] },
+  }))
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(rpc, sess, ws, {
+      t: (key) => (key === 'subagentsIncluded' ? 'sub:{n}' : key),
+    })
+    try {
+      await act(async () => { selectAllBox(container).click() })
+      await act(async () => { bulkButton(container).click(); await settle() })
+      await confirmBulk(document.querySelector('[data-sm-confirm]'))
+      assert.equal(calls.filter(([endpoint]) => endpoint === 'delete').length, 2, 'the running row never reaches the host')
+      assert.ok(container.textContent.includes('sub:5'), 'the summary adds up the whole run')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('the settings page offers orphan subagent sessions for cleanup', async () => {
+  // Orphan subagents have no row anywhere (dsh filters `origin === 'subagent'` at
+  // render time and this section filters it too), so this block is the only place
+  // their disk can be reclaimed from a UI.
+  const calls = []
+  let listed = { sessionIds: ['sub-orphan-1', 'sub-orphan-2'], total: 2, bytes: 3 * 1048576, held: 0, graceHours: 24 }
+  const rpc = (endpoint, payload) => {
+    calls.push([endpoint, payload])
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
+    if (endpoint === 'ping') return Promise.resolve({ version: '0.5.0', menuDeleteAvailable: true })
+    if (endpoint === 'orphans/list') return Promise.resolve(listed)
+    if (endpoint === 'orphans/delete') {
+      listed = { sessionIds: [], total: 0, bytes: 0, held: 0, graceHours: 24 }
+      return Promise.resolve({ sessionIds: payload.ids })
+    }
+    return new Promise(() => {})
+  }
+  await withLayout(async () => {
+    const { container, cleanup } = await renderSection(rpc, undefined, undefined, {
+      t: (key) => (key === 'orphansConfirmLabel' ? 'confirm' : key),
+    })
+    try {
+      const block = container.querySelector('[data-sm-orphans]')
+      assert.ok(block, 'the orphan block renders when the host reports orphans')
+      assert.ok(block.textContent.includes('orphansBody'), 'it names the count and the size')
+      assert.ok(!container.textContent.includes('orphansConfirmTitle'), 'the dialog is not open yet')
+
+      await act(async () => { container.querySelector('[data-sm-orphan-clean]').click(); await settle() })
+      await act(async () => { dialogButton(confirmOverlay(), 'confirm').click(); await settle() })
+      const sent = calls.find(([endpoint]) => endpoint === 'orphans/delete')
+      assert.ok(sent, 'the confirm reaches the host')
+      assert.deepEqual(sent[1].ids, ['sub-orphan-1', 'sub-orphan-2'], 'and carries exactly the listed ids')
+      assert.ok(container.textContent.includes('orphansOk'), 'the cleanup is reported')
+      assert.equal(container.querySelector('[data-sm-orphans]'), null, 'the block goes away once the list is empty')
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('the orphan block stays hidden when there is nothing to clean', async () => {
+  const rpc = (endpoint) => {
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
+    if (endpoint === 'ping') return Promise.resolve({ version: '0.5.0', menuDeleteAvailable: true })
+    if (endpoint === 'orphans/list') return Promise.resolve({ sessionIds: [], total: 0, bytes: 0, held: 0, graceHours: 24 })
+    return new Promise(() => {})
+  }
+  const { container, cleanup } = await renderSection(rpc)
+  try {
+    assert.equal(container.querySelector('[data-sm-orphans]'), null, 'no block, no noise')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('fresh orphans are held back WITH an explanation instead of a cleanup button', async () => {
+  const rpc = (endpoint) => {
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
+    if (endpoint === 'ping') return Promise.resolve({ version: '0.5.0', menuDeleteAvailable: true })
+    if (endpoint === 'orphans/list') return Promise.resolve({ sessionIds: [], total: 0, bytes: 0, held: 3, graceHours: 24 })
+    return new Promise(() => {})
+  }
+  const { container, cleanup } = await renderSection(rpc)
+  try {
+    const block = container.querySelector('[data-sm-orphans]')
+    assert.ok(block, 'the block explains why nothing is offered')
+    assert.ok(block.textContent.includes('orphansHeld'), 'the grace period is named')
+    assert.equal(container.querySelector('[data-sm-orphan-clean]'), null, 'and there is no button to press')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a failed orphan read hides the block and does not error the page', async () => {
+  const rpc = (endpoint) => {
+    if (endpoint === 'deferred/list') return Promise.resolve({ sessionIds: [], recoverable: [] })
+    if (endpoint === 'ping') return Promise.resolve({ version: '0.5.0', menuDeleteAvailable: true })
+    if (endpoint === 'orphans/list') return Promise.reject(new Error('boom'))
+    return new Promise(() => {})
+  }
+  const { container, cleanup } = await renderSection(rpc)
+  try {
+    assert.equal(container.querySelector('[data-sm-orphans]'), null)
+    assert.ok(!container.textContent.includes('errorPrefix'), 'an auxiliary read never paints the failure banner')
+  } finally {
+    await cleanup()
+  }
+})
+
 test('the AA floor holds on the surfaces the contrast script cannot see', async () => {
   // scripts/e2e-contrast.mjs samples three buttons on the OPAQUE card, so it
   // cannot see: the error banner (a red wash over the card = 4.44:1 light /

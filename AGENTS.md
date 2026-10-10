@@ -10,7 +10,7 @@ TypeScript, no linter, no bundler. Package manager is **pnpm**; Node >= 20
 
 ```bash
 pnpm install
-pnpm test   # scripts.check (node --check, every lib file) + 9 suites; the list in
+pnpm test   # scripts.check (node --check, every lib file) + 10 suites; the list in
             # package.json -> scripts.test is the whole truth
 ```
 
@@ -245,23 +245,26 @@ pnpm test   # scripts.check (node --check, every lib file) + 9 suites; the list 
 
 ## Architecture
 
-Two runtime halves, four **pure** modules they share, plus a bundle patch
+Two runtime halves, five **pure** modules they share, plus a bundle patch
 (`cordis.patch.yml` merely inserts the plugin row; `dsh plugin add` applies it):
 
 - **`lib/pending-queue.js`**, **`lib/session-summaries.js`**,
-  **`lib/artifact-paths.js`** and **`lib/registry-writes.js` — the pure halves.**
+  **`lib/artifact-paths.js`**, **`lib/registry-writes.js`** and
+  **`lib/subagent-tree.js` — the pure halves.**
   No `ctx`: the pending queue's format / versioning / input sanitization, the
   controller-list envelope + row projection, the three-seam artifact resolution,
-  and the registry read/write rules (the last two take their seams INJECTED — a
-  persistence getter, the error class — so they stay host-free). They exist so the seams whose SILENT
+  the registry read/write rules (the last two take their seams INJECTED — a
+  persistence getter, the error class — so they stay host-free), and the subagent
+  relationship + deletion order (`test/subagent-tree.test.mjs`). They exist so the seams whose SILENT
   failure actually reached users are unit-testable without standing up a host
   (`test/pending-queue.test.mjs`, `test/session-summaries.test.mjs`,
   `test/artifact-paths.test.mjs`, `test/registry-writes.test.mjs`). Keep them host-free — the moment one needs
   `ctx`, the extraction has lost its point. Their semantics are load-bearing: a
   malformed id that reaches the filesystem turns the raw sessions-root scan into
   a path-traversal delete, a torn queue file must be `degraded` rather than
-  empty, a missed artifact resurrects a deleted session, and a controller row's
-  title is a PROJECTION (see the gotcha below).
+  empty, a missed artifact resurrects a deleted session, a subagent child that is
+  not cascaded is invisible AND undeletable forever (see below), and a controller
+  row's title is a PROJECTION (see the gotcha below).
   ⚠ A new runtime file must be added to BOTH `package.json → files` (or the
   published package is broken) AND `package.json → scripts.test` when it brings a
   suite (or that suite never runs, locally or in CI).
@@ -271,7 +274,7 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
   (`connection.fetch.register({ path: `${CHANNEL}/${endpoint}`, methods:
   ['POST'], requestBody: 'buffered', fetch })` — the shape the official
   dsh-session-log-export uses) and agent tools (`tools.register`).
-  It imports the four pure modules above and keeps only the ctx-bound parts:
+  It imports the five pure modules above and keeps only the ctx-bound parts:
   the manager closure, the operation lock, the RPC handler and `apply`.
   ⚠ 0.1.5-rc host compatibility, three traps in one place — keep all three
   invariants or the whole surface silently dies:
@@ -405,6 +408,67 @@ Two runtime halves, four **pure** modules they share, plus a bundle patch
   load-bearing half in both — detach BEFORE unarchive, so a row never flashes back
   into the workspace browser — must not be reordered in either. A file failure
   after bookkeeping is a warning, not a resurrection.
+- **A permanent delete cascades over the subagent subtree — deepest first, target
+  last (`cascadeSubagents`, default ON).** The rule is exact and pinned upstream,
+  not heuristic: the persisted header carries `parentSession`, and upstream's own
+  validator accepts `origin` as EXACTLY `undefined` or `"subagent"` (verified in
+  the installed `dsh-session-persistence-jsonl`; its internal child query is
+  `header.origin === "subagent" && header.parentSession === id`) — so a forked or
+  otherwise independent session can never be swept up. `lib/subagent-tree.js`
+  owns the closure and the order; `deleteLocked` discovers from the ONE corpus
+  index it already reads and calls `deleteOneLocked` per id (the body that used to
+  be `deleteLocked`), then composes the wire result.
+  ⚠ **Why the cascade is not optional-by-default**: dsh's sidebar returns `false`
+  for `origin === 'subagent'` AT RENDER TIME (`dsh-client-ui-workspace`), this
+  plugin's settings page filters the same origin, and the agent tool refuses a
+  non-archived id — so a child left behind has NO surface at all: no row, no
+  listing, no tool. A field home had accumulated 68 such orphans (23 MB) across
+  43 first-level + 25 deeper children before this existed.
+  ⚠ **Never delete the parent first.** Deepest-first is what makes a crash
+  mid-cascade recoverable: every remaining child still has its parent on disk, so
+  re-running the same delete finds it again. The reverse order manufactures the
+  orphan shape the cascade exists to remove.
+  ⚠ **A running descendant refuses the WHOLE delete**, checked up front (before
+  anything is touched) with `details.runningSubagents`, unless `allowDeleteRunning`
+  is on — half-a-subtree is worse than a refusal. `deleteOneLocked` keeps its own
+  per-id running check as the second layer.
+  ⚠ **Only the ROOT gets the `session/not-found` gate and the fatal
+  tombstone-write behavior.** A descendant's registry failure is reported as a
+  labelled warning (`subagent <id>: …`) and left for the boot sweep: aborting the
+  subtree over one odd child would strand the rest, while the child's marker is
+  durable either way. Its `isOpen`/tombstone/marker semantics are otherwise
+  IDENTICAL to the target's (a live child is tombstoned and queued exactly like a
+  live target; `api-session/removed` is emitted for every cascaded id, because
+  the client store holds subagent summaries too).
+  Regression cover: the five `test/host.test.mjs` cases around "a permanent delete
+  takes the whole subagent subtree…" (closure, order read off the durable writes,
+  one corpus read, refusal, `cascadeSubagents: false`, the non-subagent control,
+  the open-child sweep), `test/subagent-tree.test.mjs`, and the render tests for
+  the "including N subagent session(s)" note on the menu toast, the row toast and
+  the bulk SUM.
+- **The settings page's orphan cleanup (`orphans/list`, `orphans/delete`)** is the
+  safety net for orphans that already exist — the cascade cannot reach them,
+  because it can only start from a parent that still exists. An orphan is a
+  subagent session whose parent is known to NO source (corpus ∪ controller);
+  `orphanSubagentClosure` is the same CLOSURE the cascade uses, so grandchildren
+  are found (the field case was 43 + 25). Two rules make it safe:
+  ⚠ **`orphanGraceHours` (default 24) is read through `orphanGraceHours()`, never
+  directly.** A raw composition config has no schema defaults resolved into it, so
+  the field is `undefined` → `NaN` → `Date.now() - mtime < NaN` is FALSE for every
+  entry, i.e. a NaN grace silently means NO grace and a session still being written
+  becomes deletable. The helper is the same class of guard as
+  `allowDeleteRunning !== true`; age comes from the artifact directory's mtime, and
+  an orphan with no artifact directory is held back too.
+  ⚠ **The list is RECOMPUTED inside `deleteOrphans`, never trusted from the
+  request.** A client's view is a snapshot; an id that became reachable again must
+  not be deleted by a stale click, so ineligible ids are skipped and reported, and
+  a request with no eligible id is refused (`bad-request`). Deletion goes through
+  `deleteOneLocked(..., { isRoot: false })` — the same body as any delete — ordered
+  deepest-first per subtree. Regression cover: three host cases around
+  "orphans/list …" / "orphans/delete …" / "…stale orphan request", four render
+  cases (block, confirm→host→reload, empty, grace note, failed read), and four
+  pure cases for `orphanSubagentClosure`.
+
 - **Never trust a single host seam during a destructive op** — this caused the
   0.1.4 field bug where deleted sessions resurfaced as *ungrouped* sidebar
   entries: the real `Workspace.sessionIds` getter filters members through the

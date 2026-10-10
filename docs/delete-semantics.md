@@ -126,3 +126,115 @@ Evidence, probes and the chronological record live in
   the treatment (tombstone, pending marker, `openAtDelete`); folding the flag into
   it used to strip the tombstone from open-idle deletes too, which is exactly the
   resurrection shape the tombstone exists to prevent.
+
+## The subagent subtree (`cascadeSubagents`, default ON, 0.5.0)
+
+A permanent delete removes the session's whole subagent subtree as well: its
+subagent children, their children, and so on, **deepest first, with the session
+the user clicked deleted last**.
+
+**Why the cascade exists — the orphan is unreachable, not merely invisible.**
+dsh's sidebar returns `false` for a session whose `origin === 'subagent'`
+(`dsh-client-ui-workspace/lib/client.js`), the settings page of this plugin filters
+the same origin (its rows are the user's conversations, not the model's), and the
+agent tool refuses any id that is not archived. So a subagent artifact left behind
+by a parent's delete has **no surface that could ever remove it again**: no row to
+click in either UI, no listing that carries it (`listArchived` only lists the
+archive set; subagent sessions are never archived), no tool that accepts it. It is
+pure disk. Measured on the field home that motivated this: **68 orphan artifacts,
+23.1 MB** — 43 first-level children plus **25 grandchildren**, which is why the
+discovery is a closure and not one `parentSession` lookup (a one-level sweep found
+the 43 and left the 25).
+
+**The link is exact, and upstream says so.** The persisted session header carries
+`parentSession` (string) and `origin`, and the installed backend's header
+validator accepts `origin` as **exactly** `undefined` or `"subagent"`
+(`dsh-session-persistence-jsonl`: `value.origin === void 0 || value.origin ===
+"subagent"`; its own internal child query is `source.header.origin === "subagent"
+&& source.header.parentSession === id`). A forked session, an agent-team session
+that is not a subagent, or any other independent session therefore carries no
+`origin` and can NEVER be swept up by a cascade — the `origin` check is not
+belt-and-braces, it is the whole separation between "my subagent's transcript" and
+"my other conversation".
+
+**Deepest first is a crash-safety property, not a detail.** `deleteOneLocked` per
+id keeps the same marker-then-bookkeeping-then-files order for a child as for the
+target. Ordering the subtree deepest-first means a crash part-way through leaves
+every remaining child with its parent **still on disk**, so the user's next attempt
+(a re-run, or the boot sweep via the markers already written) still finds it.
+Deleting the parent first would strand its children as exactly the orphan shape
+this cascade exists to eliminate — including the grandchildren, whose link to the
+tree would be gone with their parent.
+
+**Refusals are decided once, before anything is touched.** If any descendant has a
+RUNNING task, the whole delete is refused with `session/running` and
+`details.runningSubagents` unless `allowDeleteRunning` is on: half a subtree is
+worse than a refusal, and a refusal that arrives after three children are gone
+would be a nasty surprise. `deleteOneLocked` keeps its own per-id running check as
+a second layer.
+
+**Only the ROOT is gated like a user-facing session.** A descendant skips
+`session/not-found` (its header is why it is in the plan) and DEGRADES on a
+registry-write failure: the failure becomes a labelled warning
+(`subagent <id>: …`) and the deletion continues, because the child's marker is
+durable either way and the boot sweep can finish it. One odd child must not strand
+its siblings. The target keeps the strict behavior documented above (a failed
+tombstone write on the target still throws, with `queued: true`).
+
+**Reported, never silent.** The `delete` result carries
+`subagents: { total, sessionIds }`; the menu toast, the settings-page row toast and
+the bulk summary all append "including N subagent session(s)" (the bulk run SUMS
+over its targets), and the agent tool's reply carries the same field. That line is
+the only place a user can learn those sessions existed. `api-session/removed` is
+emitted for every cascaded id as well — the sidebar filters subagent rows at
+RENDER time, but the client list store holds their summaries, and a stale entry
+there is what the residue rules exist to prevent.
+
+**Setting it off.** `cascadeSubagents: false` restores "delete exactly the id you
+asked for" — for a deployment that treats subagent transcripts as auditable
+records. Nothing else changes; the discovery read is skipped entirely, so the
+corpus index is only built for the file phase.
+
+## The orphan cleanup (`orphans/list` / `orphans/delete`, settings page)
+
+The cascade can only start from a parent that still EXISTS, so it can never reach
+the orphans that already accumulated — hence a second, explicit path. The settings
+page grows a block whenever the host reports orphans: how many, how many MB, and
+one confirmed cleanup button.
+
+**Definition.** An orphan is a subagent session (`origin === 'subagent'`) whose
+`parentSession` id is known to NO source — neither the corpus listing nor the
+controller. `orphanSubagentClosure` computes it in `lib/subagent-tree.js` as the
+same CLOSURE the cascade uses (starting from every known id and repeatedly
+dropping a subagent whose parent no longer survives), because a one-level lookup
+reports a doomed child's OWN children as healthy: the measured field case was 43
+first-level orphans plus 25 grandchildren.
+
+**Two guards, both load-bearing.**
+
+1. **A grace period** (`orphanGraceHours`, default 24 h) measured from the
+   artifact directory's mtime. A session that is still being written must never
+   look like residue, and an orphan whose artifact directory is gone entirely is
+   held back too (there is nothing to reclaim and no age to establish). ⚠ Read it
+   through the `orphanGraceHours()` helper, never the raw field: a raw composition
+   config carries no schema defaults, so `Number(undefined)` → `NaN` → `Date.now()
+   - mtime < NaN` is false for EVERY entry, i.e. a NaN grace silently means no
+   grace at all.
+2. **The list is recomputed inside `deleteOrphans`.** The client's view is a
+   snapshot; an id that became reachable again (a restored home, a re-indexed
+   header, the cascade having run) must not be deleted by a stale click. Ineligible
+   ids are skipped and REPORTED in `warnings`, and a request whose ids are all
+   ineligible is refused with `bad-request` rather than answering "nothing to do".
+
+Deletion goes through `deleteOneLocked(..., { isRoot: false })` — the same per-id
+body a normal delete uses (marker, bookkeeping, files, projcache, removal
+broadcast) — ordered deepest-first per subtree, so a crash mid-cleanup never
+strands a child whose own parent has already been removed.
+
+The block is cosmetically silent when there is nothing to clean, and a failed
+`orphans/list` keeps it hidden with a `console.warn` rather than painting the
+failure banner: unlike a failed `deferred/list` (which would render a queued
+session as an ordinary row), a failed orphan read cannot mislead about anything
+the user is about to destroy — the destructive call re-derives the list itself.
+
+
